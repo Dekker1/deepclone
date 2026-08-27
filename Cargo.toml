@@ -26,7 +26,9 @@ default = ["derive"]
 derive = ["dep:deepclone-derive"]
 
 [dependencies]
-deepclone-derive = { version = "0.1.0", path = "derive", optional = true }
+# Pinned exactly: the derive expands to paths into this crate, so the pair must move
+# together.
+deepclone-derive = { version = "=0.1.0", path = "derive", optional = true }
 
 [lints]
 workspace = true
