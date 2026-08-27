@@ -1,0 +1,18 @@
+[package]
+name = "deepclone-derive"
+description = "Derive macro for the `deepclone` crate"
+keywords = ["deepcopy", "clone", "derive", "macro"]
+categories = ["rust-patterns"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
