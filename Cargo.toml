@@ -15,6 +15,7 @@ description = "Deep clone that copies shared data once: an `Rc`/`Arc` reached tw
 keywords = ["deepcopy", "clone", "rc", "sharing", "trait-object"]
 categories = ["rust-patterns", "memory-management"]
 readme = "README.md"
+exclude = [".github", ".gitignore", "rustfmt.toml"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
