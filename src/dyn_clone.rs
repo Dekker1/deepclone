@@ -10,7 +10,10 @@ use std::ptr;
 
 use crate::{Cloner, DeepClone};
 
-/// Not public API.
+/// Not public API: the names the macro expansion needs.
+///
+/// The expansion lands in the caller's crate, where `Box` may be shadowed or — in a `#![no_std]`
+/// caller — `::std` may not resolve at all. Routing through `$crate::` sidesteps both.
 #[doc(hidden)]
 pub mod __private {
 	pub use std::{
@@ -19,6 +22,8 @@ pub mod __private {
 	};
 }
 
+/// Machinery that keeps [`DynDeepClone`] closed to outside impls.
+#[expect(unnameable_types, reason = "being unnameable is what seals the trait")]
 mod sealed {
 	/// Prevents a hand-written [`DynDeepClone`](super::DynDeepClone) impl, which could return
 	/// a pointer to something other than a `Box<Self>` and make `deep_clone_box` unsound.
@@ -26,6 +31,7 @@ mod sealed {
 	impl<T: crate::DeepClone> Sealed for T {}
 
 	/// Makes the hidden trait method uncallable from outside this crate.
+	#[derive(Debug)]
 	pub struct Private;
 }
 use crate::dyn_clone::sealed::{Private, Sealed};
@@ -47,7 +53,7 @@ impl<T: DeepClone> DynDeepClone for T {
 	}
 }
 
-/// Deep clone a possibly unsized value into a `Box`, threading `cloner`'s memo.
+/// Deep clone a possibly unsized value into a `Box`, threading `cloner` through.
 ///
 /// The dyn-compatible counterpart of [`DeepClone::deep_clone_in`]. Rarely called directly:
 /// [`deep_clone_trait_object!`](crate::deep_clone_trait_object) wraps it into the impl you
@@ -56,7 +62,7 @@ pub fn deep_clone_box<T>(value: &T, cloner: &mut Cloner) -> Box<T>
 where
 	T: ?Sized + DynDeepClone,
 {
-	let mut fat_ptr = value as *const T;
+	let mut fat_ptr = ptr::from_ref(value);
 	// SAFETY: `__deep_clone_box` is sealed, and its only impl returns `Box::into_raw` of a
 	// `Box<Concrete>` for the erased type behind `T`. Overwriting only the data half of the
 	// fat pointer therefore pairs that allocation with the metadata `value` already carried,
@@ -64,7 +70,7 @@ where
 	// assertion pins the assumption that the data pointer is the fat pointer's first word.
 	unsafe {
 		let data_ptr = ptr::addr_of_mut!(fat_ptr).cast::<*mut ()>();
-		assert_eq!(*data_ptr as *const (), (value as *const T).cast::<()>());
+		assert_eq!(*data_ptr as *const (), ptr::from_ref(value).cast::<()>());
 		*data_ptr = T::__deep_clone_box(value, cloner, Private);
 	}
 	// SAFETY: `fat_ptr` now describes the `Box` allocated above, not reachable anywhere else.

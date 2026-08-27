@@ -3,11 +3,15 @@ name = "deepclone-derive"
 description = "Derive macro for the `deepclone` crate"
 keywords = ["deepcopy", "clone", "derive", "macro"]
 categories = ["rust-patterns"]
+readme = "../README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [lib]
 proc-macro = true

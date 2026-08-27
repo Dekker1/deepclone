@@ -2,7 +2,7 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use syn::{
 	Data, DeriveInput, Expr, Fields, Index, Path, WhereClause, parse_macro_input, parse_quote,
 	punctuated::Punctuated, spanned::Spanned,
@@ -40,6 +40,7 @@ pub fn derive_deep_clone(input: TokenStream) -> TokenStream {
 		.into()
 }
 
+/// Build the `DeepClone` impl, or the error to report in its place.
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 	let body = match &input.data {
 		Data::Struct(data) => {
@@ -172,15 +173,21 @@ enum Strategy {
 	Default,
 }
 
+/// The expression cloning one field, spanned at the field so type errors land there.
 fn field_expr(field: &syn::Field, access: TokenStream2) -> syn::Result<TokenStream2> {
+	// Spanned at the field's type, so an unsatisfied bound names the offending field.
+	let span = field.ty.span();
 	Ok(match field_strategy(field)? {
-		Strategy::Deep => quote!(::deepclone::DeepClone::deep_clone_in(#access, cloner)),
-		Strategy::Clone => quote!(::core::clone::Clone::clone(#access)),
-		Strategy::With(path) => quote!(#path(#access, cloner)),
-		Strategy::Default => quote!(::core::default::Default::default()),
+		Strategy::Deep => {
+			quote_spanned!(span => ::deepclone::DeepClone::deep_clone_in(#access, cloner))
+		}
+		Strategy::Clone => quote_spanned!(span => ::core::clone::Clone::clone(#access)),
+		Strategy::With(path) => quote_spanned!(span => #path(#access, cloner)),
+		Strategy::Default => quote_spanned!(span => ::core::default::Default::default()),
 	})
 }
 
+/// The strategy a field's `#[deepclone(..)]` attribute asks for, defaulting to recursion.
 fn field_strategy(field: &syn::Field) -> syn::Result<Strategy> {
 	let mut strategy = None;
 	for attr in field

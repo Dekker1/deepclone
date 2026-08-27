@@ -26,9 +26,10 @@ jobs:
           channel: ${{ matrix.channel }}
       - name: Run tests
         run: cargo test --workspace --all-features
-      # The library must build without the derive, which every test and doctest uses.
+      # Every doctest uses the derive and rustdoc has no per-doctest cfg, so this checks
+      # that the library and integration tests build without it.
       - name: Run tests without default features
-        run: cargo test --workspace --no-default-features
+        run: cargo test --workspace --no-default-features --lib --tests
   clippy:
     runs-on: ubuntu-latest
     steps:
@@ -42,6 +43,21 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Run clippy (no default features)
         run: cargo clippy --all-targets --no-default-features -- -D warnings
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain and miri
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly
+          components: miri
+      # `-Zmiri-ignore-leaks` is required by the strong-`Rc`-cycle test, which builds a cycle
+      # on purpose to assert that it panics; such a cycle leaks by construction.
+      - name: Run miri
+        run: cargo miri test --workspace --all-features
+        env:
+          MIRIFLAGS: "-Zmiri-ignore-leaks"
   rustdoc:
     runs-on: ubuntu-latest
     steps:

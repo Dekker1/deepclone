@@ -36,7 +36,7 @@
 //!
 //! `Rc<T>` implements [`Clone`], so `derive(Clone)` produces a copy that goes on sharing with
 //! the original, and nothing warns you. Deriving [`DeepClone`] instead routes every `Rc`
-//! through a memo table:
+//! through the cloner:
 //!
 //! ```
 //! # use std::{cell::RefCell, rc::Rc};
@@ -144,20 +144,22 @@
 //! # Scope, and what is not supported
 //!
 //! One [`Cloner`] is one clone operation, and [`DeepClone::deep_clone`] makes a fresh one per
-//! call. [`Cloner::default`] is public for cloning several values against one memo; reusing
+//! call. [`Cloner::default`] is public for cloning several values against one `Cloner`;
+//! reusing
 //! that `Cloner` for an unrelated clone is the one way to make two copies share again.
 //!
 //! - [`Cloner::rc`] and friends need `T: Sized + 'static`, so `Rc<dyn Trait>`, `Rc<[T]>`, and
-//!   `Rc<str>` are not memoized. Sharing immutable data is harmless, so `#[deepclone(clone)]`
+//!   `Rc<str>` do not go through the cloner. Sharing immutable data is harmless, so
+//!   `#[deepclone(clone)]`
 //!   is the right answer for those anyway.
 //! - That `'static` propagates from [`TypeId`]: a generic type with an
 //!   `Rc<..T..>` field needs `T: 'static` on its own declaration. The derive does not add it,
 //!   since a type with no shared fields should not have to carry it.
 //! - [`Cloner`] is neither `Send` nor `Sync`, so [`Cloner::arc`] is single-threaded.
-//! - The memo holds every copy alive until it drops, so peak memory holds both.
+//! - The [`Cloner`] holds every copy alive until it drops, so peak memory holds both.
 //! - A [`RefCell`](std::cell::RefCell) already mutably borrowed when the clone runs panics on
 //!   `borrow()`, as does a poisoned `Mutex` or `RwLock`.
-//! - Do not mutate the source from inside a [`DeepClone`] impl. The memo keys objects by
+//! - Do not mutate the source from inside a [`DeepClone`] impl. The [`Cloner`] keys objects by
 //!   address, which is unambiguous only because every source stays alive throughout.
 //!
 //! The derive is behind the default `derive` feature; the library builds without it.
@@ -174,6 +176,7 @@ mod impls;
 use std::{
 	any::{Any, TypeId, type_name},
 	collections::HashMap,
+	fmt,
 	rc::{Rc, Weak as RcWeak},
 	sync::{Arc, Weak as ArcWeak},
 };
@@ -194,18 +197,18 @@ pub use crate::dyn_clone::{DynDeepClone, deep_clone_box};
 pub trait DeepClone {
 	/// Deep clone `self`. This is the method to call.
 	///
-	/// Each call gets its own memo, so two calls never share copies with each other.
+	/// Each call gets its own [`Cloner`], so two calls never share copies with each other.
 	fn deep_clone(&self) -> Self
 	where
 		Self: Sized,
 	{
-		// The memo outlives the result's construction, so a copy that nothing else holds
+		// The `Cloner` outlives the result's construction, so a copy that nothing else holds
 		// strongly deallocates only once this returns.
 		self.deep_clone_in(&mut Cloner::default())
 	}
 
-	/// Deep clone `self` through `cloner`'s memo. This is the method to implement, and the
-	/// one to call from inside another impl so that the whole copy shares one memo.
+	/// Deep clone `self` through `cloner`. This is the method to implement, and the one to
+	/// call from inside another impl so that the whole copy shares one `Cloner`.
 	fn deep_clone_in(&self, cloner: &mut Cloner) -> Self;
 }
 
@@ -213,7 +216,7 @@ pub trait DeepClone {
 /// to its copy.
 ///
 /// [`DeepClone::deep_clone`] makes one per call, which is what you want. Construct one
-/// yourself only to clone several values against *one* memo:
+/// yourself only to clone several values against *one* `Cloner`:
 ///
 /// ```
 /// # use std::{cell::RefCell, rc::Rc};
@@ -239,6 +242,15 @@ pub struct Cloner {
 	memo: HashMap<(TypeId, usize), Entry>,
 }
 
+impl fmt::Debug for Cloner {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		// The entries are `Box<dyn Any>`, so their count is all there is to report.
+		f.debug_struct("Cloner")
+			.field("copies", &self.memo.len())
+			.finish()
+	}
+}
+
 /// A memo table entry, which needs two states so that back-edges can be resolved.
 enum Entry {
 	/// A copy whose allocation `new_cyclic` has reserved but not yet initialised. Holds a
@@ -256,6 +268,7 @@ fn stored<T: 'static>(entry: &dyn Any) -> &T {
 		.expect("memo entries are stored under a key carrying their own TypeId")
 }
 
+/// Report a cycle of strong edges, which cannot be copied and would have leaked anyway.
 #[cold]
 fn strong_cycle<T>() -> ! {
 	panic!(
@@ -273,7 +286,7 @@ fn strong_cycle<T>() -> ! {
 macro_rules! shared_ptr_methods {
 	($strong:ident, $weak:ident, $strong_fn:ident, $weak_fn:ident) => {
 		impl Cloner {
-			#[doc = concat!("Deep clone `", stringify!($strong), "<T>` through the memo table.")]
+			#[doc = concat!("Deep clone `", stringify!($strong), "<T>` through the cloner.")]
 			///
 			/// The first call for a given source allocates one copy and records it; later
 			/// calls return another handle to that same copy.
@@ -308,7 +321,7 @@ macro_rules! shared_ptr_methods {
 				copy
 			}
 
-			#[doc = concat!("Deep clone `", stringify!($weak), "<T>` through the memo table.")]
+			#[doc = concat!("Deep clone `", stringify!($weak), "<T>` through the cloner.")]
 			///
 			/// A live source upgrades, clones through
 			#[doc = concat!("[`", stringify!($strong_fn), "`](Self::", stringify!($strong_fn), ")")]
@@ -316,9 +329,10 @@ macro_rules! shared_ptr_methods {
 			/// depend on whether the target was reached strongly first. An already-dangling
 			/// source clones to a dangling `Weak`.
 			///
-			/// The memo holds the target strongly until it drops, so a weak-only target
-			/// survives long enough to be pointed at and then deallocates unless the copy
-			/// holds it — mirroring the source.
+			/// The `Cloner` holds the target strongly until it drops, so a weak-only target
+			/// survives long enough to be pointed at, then deallocates unless the copy holds
+			/// it. A source whose only strong owner sits outside what was cloned therefore
+			/// copies to a dangling `Weak`.
 			pub fn $weak_fn<T: DeepClone + 'static>(&mut self, src: &$weak<T>) -> $weak<T> {
 				let Some(strong) = src.upgrade() else {
 					return $weak::new();

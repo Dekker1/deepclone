@@ -1,7 +1,8 @@
 //! [`DeepClone`] impls for the standard library.
 //!
 //! Split three ways, following CPython's `copy` module: types with nothing to copy deeply,
-//! containers that recurse into their contents, and the shared pointers that consult the memo.
+//! containers that recurse into their contents, and the shared pointers that consult the
+//! cloner.
 
 use std::{
 	any::TypeId,
@@ -38,9 +39,9 @@ use crate::{Cloner, DeepClone};
 
 /// Types that reach no shared pointer, so [`Clone::clone`] is already a deep copy.
 ///
-/// A blanket `impl<T: Copy> DeepClone for T` would cover the first two rows and is sound —
-/// `Rc` is not `Copy` — but it overlaps every generic container impl below, since `Option<T>`,
-/// `[T; N]`, and tuples are all `Copy` when their parameters are.
+/// A blanket `impl<T: Copy> DeepClone for T` would cover most of these and is sound — `Rc` is
+/// not `Copy` — but it overlaps every generic container impl below, since `Option<T>`,
+/// `[T; N]`, and tuples are `Copy` when their parameters are.
 macro_rules! atomic {
     ($($ty:ty),* $(,)?) => {$(
         impl DeepClone for $ty {
@@ -104,7 +105,7 @@ impl<T: DeepClone> DeepClone for RangeToInclusive<T> {
 }
 
 /// Rebuilt from its bounds, which resets the exhaustion an iterated `RangeInclusive` tracks
-/// privately. `Clone` preserves that; there is no public way to reproduce it.
+/// privately and `Clone` preserves. There is no public way to reproduce it.
 impl<T: DeepClone> DeepClone for RangeInclusive<T> {
 	fn deep_clone_in(&self, cloner: &mut Cloner) -> Self {
 		self.start().deep_clone_in(cloner)..=self.end().deep_clone_in(cloner)
@@ -136,8 +137,8 @@ impl<B: DeepClone, C: DeepClone> DeepClone for ControlFlow<B, C> {
 	}
 }
 
-/// Unconditional in `T`, because a derived impl adds a `T: DeepClone` bound for every type
-/// parameter and a marker-only parameter would otherwise be unable to satisfy it.
+/// Unconditional in `T`, since the derive bounds every type parameter by `DeepClone` and a
+/// marker-only parameter could not satisfy that.
 impl<T: ?Sized> DeepClone for PhantomData<T> {
 	fn deep_clone_in(&self, _cloner: &mut Cloner) -> Self {
 		PhantomData
@@ -195,7 +196,8 @@ where
 	}
 }
 
-/// Sequence containers, all of which rebuild from a mapped iterator.
+/// Sequence containers, rebuilt from a mapped iterator — so a `BinaryHeap` copy is
+/// re-heapified, which can reorder equal elements.
 macro_rules! sequence {
     ($($container:ident<T $(: $bound:ident)?>),* $(,)?) => {$(
         impl<T: DeepClone $(+ $bound)?> DeepClone for $container<T> {
@@ -208,6 +210,8 @@ macro_rules! sequence {
 
 sequence!(Vec<T>, VecDeque<T>, LinkedList<T>, BTreeSet<T: Ord>, BinaryHeap<T: Ord>);
 
+/// Rebuilt by `collect`, so the copy re-hashes with `S::default()` and may iterate in a
+/// different order. Only observable with a stateful `S`.
 impl<T: DeepClone + Eq + Hash, S: BuildHasher + Default> DeepClone for HashSet<T, S> {
 	fn deep_clone_in(&self, cloner: &mut Cloner) -> Self {
 		self.iter()
@@ -216,6 +220,7 @@ impl<T: DeepClone + Eq + Hash, S: BuildHasher + Default> DeepClone for HashSet<T
 	}
 }
 
+/// Rebuilt by `collect`, with the same caveat as [`HashSet`].
 impl<K: DeepClone + Eq + Hash, V: DeepClone, S: BuildHasher + Default> DeepClone
 	for HashMap<K, V, S>
 {
@@ -258,8 +263,8 @@ macro_rules! once {
 once!(OnceCell, OnceLock);
 
 /// Atomics have no `Clone`, so this is the one place a value is read rather than cloned.
-/// `Relaxed` is enough: the memo is single-threaded, and a concurrent writer would make any
-/// stronger ordering equally arbitrary.
+/// `Relaxed` suffices: a concurrent writer would make any stronger ordering equally
+/// arbitrary.
 macro_rules! atomics {
     ($($ty:ident),* $(,)?) => {$(
         impl DeepClone for $ty {
@@ -302,8 +307,8 @@ impl<T: DeepClone> DeepClone for RwLock<T> {
 	}
 }
 
-/// The shared pointers, which are the entire point: each one consults the memo so that a
-/// source object reached twice is copied once.
+/// The shared pointers, which are the entire point: each consults the cloner, so a source
+/// reached twice is copied once.
 macro_rules! shared {
     ($($ty:ident<T> => $method:ident),* $(,)?) => {$(
         impl<T: DeepClone + 'static> DeepClone for $ty<T> {

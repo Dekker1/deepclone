@@ -3,6 +3,10 @@
 // The derive is what makes these shapes writable at all, so there is nothing left to test
 // without it.
 #![cfg(feature = "derive")]
+#![expect(
+	clippy::tests_outside_test_module,
+	reason = "an integration test crate is entirely tests"
+)]
 
 use std::{
 	cell::RefCell,
