@@ -1,0 +1,5 @@
+[[package]]
+name = "deepclone-derive"
+# The derive is pinned to an exact version of the main crate and nobody depends on it
+# directly, so its changelog would only ever duplicate the one at the root.
+changelog_update = false
