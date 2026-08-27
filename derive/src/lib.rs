@@ -8,7 +8,7 @@ use syn::{
 	punctuated::Punctuated, spanned::Spanned,
 };
 
-/// Derive [`DeepClone`], cloning every field through the same [`Cloner`].
+/// Derive `DeepClone`, cloning every field through the same `Cloner`.
 ///
 /// Structs (named, tuple, and unit), enums, generics, and where-clauses are supported; unions
 /// are not. Every type parameter gains a `DeepClone` bound, as `derive(Clone)` adds a `Clone`

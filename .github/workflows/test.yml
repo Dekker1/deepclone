@@ -1,0 +1,54 @@
+name: Run Tests
+
+on:
+  push:
+    branches:
+      - "develop"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  RUST_CHANNEL: "stable"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The oldest channel is the `rust-version` declared in Cargo.toml, so that the
+        # claim is checked rather than assumed.
+        channel: ["stable", "1.85"]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: ${{ matrix.channel }}
+      - name: Run tests
+        run: cargo test --workspace --all-features
+      # The library must build without the derive, which every test and doctest uses.
+      - name: Run tests without default features
+        run: cargo test --workspace --no-default-features
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain and clippy
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: ${{ env.RUST_CHANNEL }}
+          components: clippy
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+  rustdoc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: ${{ env.RUST_CHANNEL }}
+      - name: Run rustdoc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features

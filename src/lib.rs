@@ -150,7 +150,7 @@
 //! - [`Cloner::rc`] and friends need `T: Sized + 'static`, so `Rc<dyn Trait>`, `Rc<[T]>`, and
 //!   `Rc<str>` are not memoized. Sharing immutable data is harmless, so `#[deepclone(clone)]`
 //!   is the right answer for those anyway.
-//! - That `'static` propagates from [`TypeId`](std::any::TypeId): a generic type with an
+//! - That `'static` propagates from [`TypeId`]: a generic type with an
 //!   `Rc<..T..>` field needs `T: 'static` on its own declaration. The derive does not add it,
 //!   since a type with no shared fields should not have to carry it.
 //! - [`Cloner`] is neither `Send` nor `Sync`, so [`Cloner::arc`] is single-threaded.
