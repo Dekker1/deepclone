@@ -1,15 +1,15 @@
-//! What the memo costs, against the two things it replaces.
+//! What the cloner costs, against the two things it replaces.
 //!
 //! `Clone` is the floor: it bumps refcounts and copies nothing. The naive deep clone is what
 //! anyone writes by hand before discovering the aliasing problem. The interesting number is
-//! the gap to `Clone` on data with no sharing, since that is the case where the memo is pure
+//! the gap to `Clone` on data with no sharing, since that is the case where the cloner is pure
 //! overhead.
 
 use std::{hint::black_box, rc::Rc};
 
 use deepclone::DeepClone;
 
-/// Plain data with no shared pointers, where the memo is never touched.
+/// Plain data with no shared pointers, where the cloner is never consulted.
 #[derive(Clone, DeepClone)]
 struct Flat {
 	/// Some owned heap data to make the copy non-trivial.
@@ -27,7 +27,7 @@ struct Node {
 	children: Vec<Rc<Node>>,
 }
 
-/// A chain of unique nodes, so every `Rc` is a memo miss and the table is pure cost.
+/// A chain of unique nodes, so every `Rc` misses and the cloner is pure cost.
 fn chain(depth: u64) -> Node {
 	let mut node = Node {
 		value: 0,
@@ -42,7 +42,7 @@ fn chain(depth: u64) -> Node {
 	node
 }
 
-/// `width` nodes all pointing at one shared subtree, which is the shape the memo exists for:
+/// `width` nodes all pointing at one shared subtree, which is the shape the cloner exists for:
 /// the naive clone copies that subtree `width` times where this copies it once. Sharing a
 /// *leaf* would measure nothing, since copying a leaf is cheaper than hashing it.
 fn dag(width: u64, shared_depth: u64) -> Node {
@@ -77,7 +77,7 @@ fn naive(node: &Node) -> Node {
 	}
 }
 
-/// Data with no shared pointers, where the memo is created but never touched.
+/// Data with no shared pointers, where the cloner is created but never consulted.
 #[divan::bench_group(name = "flat, no shared pointers")]
 mod flat {
 	use deepclone::DeepClone;
@@ -107,7 +107,7 @@ mod flat {
 	}
 }
 
-/// The shape the memo exists for: one subtree reachable through many parents.
+/// The shape the cloner exists for: one subtree reachable through many parents.
 #[divan::bench_group(name = "dag, 16 nodes sharing a 64-node subtree")]
 mod shared {
 	use deepclone::DeepClone;
@@ -128,7 +128,7 @@ mod shared {
 		bencher.bench_local(|| black_box(black_box(&source).deep_clone()));
 	}
 
-	/// A deep clone without a memo, which duplicates shared data.
+	/// A deep clone with no cloner, which duplicates shared data.
 	#[divan::bench]
 	fn naive_deep_clone(bencher: divan::Bencher) {
 		let source = dag(16, 64);
@@ -136,7 +136,7 @@ mod shared {
 	}
 }
 
-/// Every `Rc` unique, so the memo is pure overhead with nothing to deduplicate.
+/// Every `Rc` unique, so the cloner is pure overhead with nothing to deduplicate.
 #[divan::bench_group(name = "chain, 256 unique nodes")]
 mod unshared {
 	use deepclone::DeepClone;
@@ -157,7 +157,7 @@ mod unshared {
 		bencher.bench_local(|| black_box(black_box(&source).deep_clone()));
 	}
 
-	/// A deep clone without a memo, which duplicates shared data.
+	/// A deep clone with no cloner, which duplicates shared data.
 	#[divan::bench]
 	fn naive_deep_clone(bencher: divan::Bencher) {
 		let source = chain(256);

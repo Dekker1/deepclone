@@ -120,12 +120,12 @@ fn container_bound(input: &DeriveInput) -> syn::Result<Option<WhereClause>> {
 /// are not. Every type parameter gains a `DeepClone` bound, as `derive(Clone)` adds a `Clone`
 /// bound.
 ///
-/// Nothing here inspects field types: `Rc` and `Arc` route through the memo because their own
-/// `DeepClone` impls do, so `Vec<Rc<T>>`, `Option<Rc<T>>`, and `HashMap<K, Rc<T>>` work too —
-/// all three of which a derive matching on the literal token `Rc` would miss.
+/// Nothing here inspects field types: `Rc` and `Arc` reach the cloner through their own
+/// `DeepClone` impls, so `Vec<Rc<T>>` and `HashMap<K, Rc<T>>` work too, which a derive
+/// matching on the literal token `Rc` would miss.
 ///
-/// No `'static` bound is added, since only types actually holding an `Rc` or `Arc` need one. A
-/// generic type with an `Rc<..T..>` field therefore needs `T: 'static` on its declaration.
+/// No `'static` bound is added, so a generic type with an `Rc<..T..>` field needs `T: 'static`
+/// on its own declaration.
 ///
 /// # Field attributes
 ///

@@ -9,7 +9,7 @@
 //!   destroyed: two fields that pointed at one object now point at two.
 //!
 //! This crate is the third behaviour: each object is copied once, and every reference to it
-//! in the copy points at that one new object. It is `copy.deepcopy(x, memo)` from Python, and
+//! in the copy points at that one new object. It is `copy.deepcopy` from Python, and
 //! algorithmically a copying garbage collector's forwarding table.
 //!
 //! Serde documents the same gap: its `rc` feature warns that these types "do not preserve
@@ -89,10 +89,8 @@
 //!
 //! # There is deliberately no blanket impl
 //!
-//! `impl<T: Clone> DeepClone for T` would make adoption free and reintroduce the footgun:
-//! `Rc<T>: Clone`, and without specialization such an impl could not be overridden for `Rc`.
-//! It would also make [`DeepClone`] unimplementable by hand, since coherence forbids a manual
-//! impl on a type a blanket impl already covers.
+//! `impl<T: Clone> DeepClone for T` would reintroduce the footgun, since `Rc<T>: Clone` and
+//! without specialization such an impl could not be overridden for `Rc`.
 //!
 //! So a field whose type has no [`DeepClone`] impl is a compile error. Opt out per field with
 //! `#[deepclone(clone)]`.
@@ -138,29 +136,24 @@
 //! correctly, cycles included: a `Weak` needs only its target's *identity*, and
 //! [`Rc::new_cyclic`] reserves the copy's allocation before the pointee is built.
 //!
-//! A cycle of *strong* edges panics instead of overflowing the stack. Such a cycle leaks in
-//! the original too, so it is a bug in the source rather than a missing feature here.
+//! A cycle of *strong* edges panics instead of overflowing the stack. It leaks in the original
+//! too, so it is a bug in the source.
 //!
 //! # Scope, and what is not supported
 //!
 //! One [`Cloner`] is one clone operation, and [`DeepClone::deep_clone`] makes a fresh one per
-//! call. [`Cloner::default`] is public for cloning several values against one `Cloner`;
-//! reusing
-//! that `Cloner` for an unrelated clone is the one way to make two copies share again.
+//! call. Reusing one for an unrelated clone is the one way to make two copies share again.
 //!
 //! - [`Cloner::rc`] and friends need `T: Sized + 'static`, so `Rc<dyn Trait>`, `Rc<[T]>`, and
-//!   `Rc<str>` do not go through the cloner. Sharing immutable data is harmless, so
-//!   `#[deepclone(clone)]`
-//!   is the right answer for those anyway.
-//! - That `'static` propagates from [`TypeId`]: a generic type with an
-//!   `Rc<..T..>` field needs `T: 'static` on its own declaration. The derive does not add it,
-//!   since a type with no shared fields should not have to carry it.
+//!   `Rc<str>` are not tracked. Use `#[deepclone(clone)]` for those.
+//! - That `'static` propagates from [`TypeId`]: a generic type with an `Rc<..T..>` field needs
+//!   `T: 'static` on its own declaration, which the derive does not add for you.
 //! - [`Cloner`] is neither `Send` nor `Sync`, so [`Cloner::arc`] is single-threaded.
-//! - The [`Cloner`] holds every copy alive until it drops, so peak memory holds both.
-//! - A [`RefCell`](std::cell::RefCell) already mutably borrowed when the clone runs panics on
-//!   `borrow()`, as does a poisoned `Mutex` or `RwLock`.
-//! - Do not mutate the source from inside a [`DeepClone`] impl. The [`Cloner`] keys objects by
-//!   address, which is unambiguous only because every source stays alive throughout.
+//! - Peak memory holds both copies, since the [`Cloner`] keeps every copy alive.
+//! - A [`RefCell`](std::cell::RefCell) already mutably borrowed panics on `borrow()`, as does
+//!   a poisoned `Mutex` or `RwLock`.
+//! - Do not mutate the source from inside a [`DeepClone`] impl. Objects are keyed by address,
+//!   which is unambiguous only because every source stays alive throughout.
 //!
 //! The derive is behind the default `derive` feature; the library builds without it.
 //!
@@ -170,7 +163,7 @@
 //! `oxc_allocator::CloneIn` is the precedent for a context-carrying clone trait. The README
 //! covers how this differs from the similarly named crates.
 
-/// Generate the memoized clone methods for one flavour of shared pointer.
+/// Generate the cloner's methods for one flavour of shared pointer.
 ///
 /// `Rc` and `Arc` differ only in their type names here, but they are distinct types with
 /// distinct `Weak` companions, so the pair cannot be written generically.
@@ -249,7 +242,6 @@ mod impls;
 
 use std::{
 	any::{Any, TypeId, type_name},
-	collections::HashMap,
 	fmt,
 	rc::{Rc, Weak as RcWeak},
 	sync::{Arc, Weak as ArcWeak},
@@ -257,6 +249,7 @@ use std::{
 
 #[cfg(feature = "derive")]
 pub use deepclone_derive::DeepClone;
+use rustc_hash::FxHashMap;
 
 #[doc(hidden)]
 pub use crate::dyn_clone::__private;
@@ -282,14 +275,17 @@ pub use crate::dyn_clone::{DynDeepClone, deep_clone_box};
 /// assert!(Rc::ptr_eq(&left, &right));
 /// ```
 ///
-/// Reusing a `Cloner` for an unrelated clone makes the two share copies, which is the bug
-/// this crate exists to prevent. When in doubt, make a new one.
+/// Reusing one for an unrelated clone makes those two share copies, which is the bug this
+/// crate exists to prevent.
 #[derive(Default)]
 pub struct Cloner {
-	/// The address alone would very likely do, since only whole heap allocations are keyed
-	/// and two live ones are disjoint, but the `TypeId` makes the downcasts below correct by
+	/// The address alone would very likely do, since only whole heap allocations are keyed and
+	/// two live ones are disjoint, but the `TypeId` makes the downcasts below correct by
 	/// construction rather than by an argument about `Rc`'s private layout.
-	memo: HashMap<(TypeId, usize), Entry>,
+	///
+	/// FxHash because the keys are addresses, not attacker-chosen, and `SipHash` costs about
+	/// 30% of the per-`Rc` price.
+	memo: FxHashMap<(TypeId, usize), Entry>,
 }
 
 /// A clone that copies everything reachable, preserving the sharing among the copies: two
@@ -304,7 +300,8 @@ pub struct Cloner {
 	note = "derive `DeepClone` on `{Self}` if you own it, or mark the field \
 	        `#[deepclone(clone)]` if a shallow clone is correct for it",
 	note = "`Rc<[T]>`, `Rc<str>`, and `Rc<dyn Trait>` land here by design: `Cloner::rc` keys the \
-	        memo on `TypeId`, so it needs `T: Sized + 'static`. Use `#[deepclone(clone)]` for them"
+	        cloner on `TypeId`, so it needs `T: Sized + 'static`. Use `#[deepclone(clone)]` for \
+	        them"
 )]
 pub trait DeepClone {
 	/// Deep clone `self`. This is the method to call.
@@ -346,8 +343,8 @@ fn stored<T: 'static>(entry: &dyn Any) -> &T {
 fn strong_cycle<T>() -> ! {
 	panic!(
 		"deep clone reached a cycle of strong `Rc`/`Arc` edges through `{}`; the copy of that \
-         object does not exist yet, so there is nothing to point at. Such a cycle also leaks \
-         in the original — use `Weak` for back-edges, which this crate does support.",
+		 object does not exist yet, so there is nothing to point at. Such a cycle also leaks \
+		 in the original — use `Weak` for back-edges, which this crate does support.",
 		type_name::<T>(),
 	)
 }

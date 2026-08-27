@@ -6,8 +6,8 @@ Deep clone that copies shared data once.
 through to the original. A hand-written deep clone goes wrong the other way, duplicating the
 pointee at every reference, so what was shared once becomes two separate copies. This crate is
 the third behaviour: each object is copied once, every reference to it in the copy points at
-that one new object, and the copy shares nothing with the original. It is `copy.deepcopy` with
-Python's `memo` argument.
+that one new object, and the copy shares nothing with the original. It is Python's
+`copy.deepcopy`.
 
 ```rust
 use std::{cell::RefCell, rc::Rc};
@@ -47,8 +47,8 @@ Two crates share this one's trait name, and one of them has the opposite semanti
 
 - [`deep-clone`](https://crates.io/crates/deep-clone) (unmaintained since 2022) declares the
   same `DeepClone::deep_clone`, but its `Rc` impl is `Rc::new(self.deref().deep_clone())`. With
-  no memo, a diamond becomes two allocations. That is the failure this crate exists to avoid,
-  shipped under this crate's trait name.
+  nothing tracking what it has already copied, a diamond becomes two allocations. That is the
+  failure this crate exists to avoid, shipped under this crate's trait name.
 - [`asajeffrey/deep-clone`](https://github.com/asajeffrey/deep-clone) also spells it
   `DeepClone::deep_clone`, but solves lifetime erasure: an associated `type DeepCloned: 'static`
   turns a `Cow<'a, T>` into a `Cow<'static, T>`.
@@ -61,24 +61,23 @@ Two crates share this one's trait name, and one of them has the opposite semanti
 
 ## What it costs
 
-Medians from `cargo bench -- --sample-count 1000` on an Apple M4, against `Clone` and against
-a deep clone written the obvious way, without a memo.
+Medians from `cargo bench -- --sample-count 1000` on an Apple M4.
 
 | | `Clone` | `deep_clone` | naive deep clone |
 |---|---|---|---|
-| A struct with no shared pointers | 106 ns | 110 ns | n/a |
-| 16 nodes sharing a 64-node subtree | 11 ns | **7.6 µs** | 22.2 µs |
-| A chain of 256 unique nodes | 6 ns | **26.7 µs** | 5.7 µs |
+| A struct with no shared pointers | ~105 ns | ~105 ns | n/a |
+| 16 nodes sharing a 64-node subtree | n/a | **5.4 µs** | 23.5 µs |
+| A chain of 256 unique nodes | n/a | 18.5 µs | **6.1 µs** |
 
-`Clone` is not a competitor on the last two rows. It bumps a refcount and copies nothing, which
-is the bug. Against a real deep clone, memoising wins outright when there is sharing to exploit
-and costs about 80 ns per `Rc` when there is none, that being one hash and one insert.
+`n/a` marks what a column cannot do: `Clone` never makes an independent copy, and with no
+shared pointers a naive deep clone is this one.
 
-The first row is a wash: data with no shared pointers never touches the memo, and the
-element-wise `collect` that rebuilds a `Vec` hits the same `TrustedLen` specialisation `Clone`
-does. It is also allocation-dominated, so run that group on its own; benchmark groups
-contaminate each other through allocator state enough to flip the sign of a difference that
-small.
+The trade against a naive deep clone is one hash and one insert per `Rc`, about 50 ns, in
+exchange for skipping every repeated visit to a shared object. The more sharing, the further
+ahead this gets; with none, it is a straight loss.
+
+The first row is a wash and allocation-dominated. Measure it on its own if you care, since
+neighbouring benchmark groups move it by more than the difference.
 
 ## Licence
 
