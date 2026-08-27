@@ -32,8 +32,8 @@ macro_rules! atomics {
     )*};
 }
 
-/// `Wrapping` and `Saturating` are `Copy` whenever `T` is, so they need no `T: DeepClone`
-/// bound — and not asking for one lets them hold a foreign type that lacks the impl.
+/// `Copy` whenever `T` is, so they need no `T: DeepClone` bound, and not asking for one lets
+/// them hold a foreign type that lacks the impl.
 macro_rules! copy_wrapper {
 	($($ty:ident),*) => {$(
 		impl<T: Copy> DeepClone for $ty<T> {
@@ -45,10 +45,8 @@ macro_rules! copy_wrapper {
 }
 
 /// Byte-backed slices behind a shared pointer, where the copy shares the original's
-/// allocation.
-///
-/// Nothing in these can hide interior mutability, so sharing is unobservable, and it beats
-/// copying on every count: no allocation, and two fields on one source stay on one copy.
+/// allocation. None can hide interior mutability, so sharing is unobservable and saves the
+/// copy, while two fields on one source still reach one copy.
 macro_rules! immutable_slice {
 	($($ty:ty),* $(,)?) => {$(
 		impl DeepClone for Rc<$ty> {
@@ -173,7 +171,7 @@ use std::{
 	time::{Duration, Instant, SystemTime},
 };
 
-use crate::{Cloner, DeepClone, DynDeepClone, deep_clone_box};
+use crate::{Cloner, DeepClone, DynDeepClone, dyn_clone::deep_clone_box};
 
 impl<K: DeepClone + Ord, V: DeepClone> DeepClone for BTreeMap<K, V> {
 	fn deep_clone_in(&self, cloner: &mut Cloner) -> Self {
@@ -193,8 +191,8 @@ impl<T: DeepClone> DeepClone for Bound<T> {
 	}
 }
 
-/// Every `Box` goes through the dyn-compatible path, which covers `Box<dyn Trait>` and its
-/// auto-trait variants without the trait's author writing anything but the supertrait bound.
+/// Every `Box` takes the dyn-compatible path, so `Box<dyn Trait>` and its auto-trait variants
+/// need nothing from the trait's author but the supertrait bound.
 impl<T: ?Sized + DynDeepClone> DeepClone for Box<T> {
 	fn deep_clone_in(&self, cloner: &mut Cloner) -> Self {
 		deep_clone_box(&**self, cloner)

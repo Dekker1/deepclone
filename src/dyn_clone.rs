@@ -4,12 +4,11 @@
 //! is David Tolnay's from `dyn-clone`: a hidden method returns the copy as a thin `*mut ()`,
 //! and the caller splices that data pointer into a fat pointer whose metadata it already has.
 //!
-//! Unlike `dyn-clone`, no macro is needed on top. `Clone` and `Box` are both foreign to that
-//! crate, so the orphan rule forces the `Box<dyn Trait>` impl into the caller's crate;
-//! [`DeepClone`](crate::DeepClone) is local here, so one blanket impl over [`DynDeepClone`]
-//! covers every trait object and every auto-trait variant of it.
+//! `dyn-clone` needs a macro on top of that, because `Clone` is foreign to it and the orphan
+//! rule forces the `Box<dyn Trait>` impl into the caller's crate. Ours is local, so one blanket
+//! impl over [`DynDeepClone`] covers every trait object and auto-trait variant.
 
-use std::ptr;
+use std::{ptr, rc::Rc, sync::Arc};
 
 use crate::{
 	Cloner, DeepClone,
@@ -28,10 +27,9 @@ pub trait DynDeepClone: Sealed {
 
 /// Deep clone a possibly unsized value into a `Box`, threading `cloner` through.
 ///
-/// The dyn-compatible counterpart of [`DeepClone::deep_clone_in`]. Rarely called directly,
-/// since `Box<T>` already routes through it; reach for it when writing an impl for another
-/// pointer, such as `Rc<dyn YourTrait>`.
-pub fn deep_clone_box<T>(value: &T, cloner: &mut Cloner) -> Box<T>
+/// The dyn-compatible counterpart of [`DeepClone::deep_clone_in`], and the crate's only
+/// `unsafe`. Reached through `Box`'s impl and the unsized helpers.
+pub(crate) fn deep_clone_box<T>(value: &T, cloner: &mut Cloner) -> Box<T>
 where
 	T: ?Sized + DynDeepClone,
 {
@@ -48,6 +46,41 @@ where
 	}
 	// SAFETY: `fat_ptr` now describes the `Box` allocated above, not reachable anywhere else.
 	unsafe { Box::from_raw(fat_ptr as *mut T) }
+}
+
+/// Deep clone an `Arc<dyn YourTrait>`, as [`deep_clone_unsized_rc`] does for `Rc`.
+pub fn deep_clone_unsized_arc<T>(src: &Arc<T>, cloner: &mut Cloner) -> Arc<T>
+where
+	T: ?Sized + DynDeepClone + 'static,
+{
+	cloner.arc_unsized(src, |cloner| Arc::from(deep_clone_box(&**src, cloner)))
+}
+
+/// Deep clone an `Rc<dyn YourTrait>`.
+///
+/// `Rc` is not `#[fundamental]`, so neither this crate nor yours may write
+/// `impl DeepClone for Rc<dyn YourTrait>`. Name this at the field instead:
+///
+/// ```
+/// # use std::rc::Rc;
+/// use deepclone::{DeepClone, DynDeepClone};
+///
+/// trait Propagator: DynDeepClone {}
+///
+/// #[derive(DeepClone)]
+/// struct Solver {
+///     #[deepclone(with = deepclone::deep_clone_unsized_rc)]
+///     propagator: Rc<dyn Propagator>,
+/// }
+/// ```
+///
+/// For unsized pointees only. A sized `Rc<T>` already deep clones on its own, through a path
+/// that supports cycles, which this one cannot.
+pub fn deep_clone_unsized_rc<T>(src: &Rc<T>, cloner: &mut Cloner) -> Rc<T>
+where
+	T: ?Sized + DynDeepClone + 'static,
+{
+	cloner.rc_unsized(src, |cloner| Rc::from(deep_clone_box(&**src, cloner)))
 }
 
 impl<T: DeepClone> DynDeepClone for T {

@@ -1,19 +1,15 @@
 //! Deep clone that copies shared data once.
 //!
-//! Rust gives you two behaviours for cloning an object graph that contains `Rc` or `Arc`,
-//! and neither one is "an independent copy of the whole graph":
+//! Cloning a value that holds an `Rc` gives you two behaviours, neither of which is an
+//! independent copy: [`#[derive(Clone)]`][Clone] bumps the reference count, so the copy shares
+//! mutable state with the original, and a hand-written deep clone duplicates the pointee at
+//! every reference, so two fields that pointed at one object now point at two.
 //!
-//! - [`#[derive(Clone)]`][Clone] bumps the reference count. The "copy" shares mutable state
-//!   with the original, which is usually a silent bug.
-//! - A hand-written deep clone duplicates the pointee at every reference. Internal sharing is
-//!   destroyed: two fields that pointed at one object now point at two.
-//!
-//! This crate is the third behaviour: each object is copied once, and every reference to it
-//! in the copy points at that one new object. It is `copy.deepcopy` from Python, and
-//! algorithmically a copying garbage collector's forwarding table.
-//!
-//! Serde documents the same gap: its `rc` feature warns that these types "do not preserve
-//! identity and may result in multiple copies of the same data".
+//! This crate is the third behaviour: each object is copied once, and every reference to it in
+//! the copy points at that one new object. It is `copy.deepcopy` from Python, and
+//! algorithmically a copying garbage collector's forwarding table. Serde documents the same
+//! gap, warning that its `rc` feature "does not preserve identity and may result in multiple
+//! copies of the same data".
 //!
 //! # The footgun
 //!
@@ -34,9 +30,8 @@
 //! assert_eq!(*original.shared.borrow(), 42);
 //! ```
 //!
-//! `Rc<T>` implements [`Clone`], so `derive(Clone)` produces a copy that goes on sharing with
-//! the original, and nothing warns you. Deriving [`DeepClone`] instead routes every `Rc`
-//! through the cloner:
+//! `Rc<T>` implements [`Clone`], so that compiles with no warning. Deriving [`DeepClone`]
+//! instead routes every `Rc` through the cloner:
 //!
 //! ```
 //! # use std::{cell::RefCell, rc::Rc};
@@ -90,10 +85,8 @@
 //! # There is deliberately no blanket impl
 //!
 //! `impl<T: Clone> DeepClone for T` would reintroduce the footgun, since `Rc<T>: Clone` and
-//! without specialization such an impl could not be overridden for `Rc`.
-//!
-//! So a field whose type has no [`DeepClone`] impl is a compile error. Opt out per field with
-//! `#[deepclone(clone)]`.
+//! without specialization such an impl could not be overridden for `Rc`. So a field whose type
+//! has no [`DeepClone`] impl is a compile error; opt out per field with `#[deepclone(clone)]`.
 //!
 //! # Trait objects
 //!
@@ -132,26 +125,20 @@
 //!
 //! Strong `Rc` edges downwards with [`Weak`](std::rc::Weak) back-edges upwards clones
 //! correctly, cycles included: a `Weak` needs only its target's *identity*, and
-//! [`Rc::new_cyclic`] reserves the copy's allocation before the pointee is built.
-//!
-//! A cycle of *strong* edges panics instead of overflowing the stack. It leaks in the original
-//! too, so it is a bug in the source.
+//! [`Rc::new_cyclic`] reserves the copy's allocation before the pointee is built. A cycle of
+//! *strong* edges panics instead of overflowing the stack; it leaks in the original too, so it
+//! is a bug in the source.
 //!
 //! # Scope, and what is not supported
 //!
 //! One [`Cloner`] is one clone operation, and [`DeepClone::deep_clone`] makes a fresh one per
 //! call. Reusing one for an unrelated clone is the one way to make two copies share again.
 //!
-//! - `Rc<dyn Trait>` needs an impl of your own, written with [`Cloner::rc_unsized`] and
-//!   [`deep_clone_box`]. A blanket one would overlap every other `Rc` impl.
-//! - `Rc<str>`, `Rc<CStr>`, `Rc<OsStr>`, and `Rc<Path>` share the source's allocation instead
-//!   of copying it. Nothing in them can hide interior mutability, so this is unobservable and
-//!   saves the copy. `Rc<[T]>` cannot do the same, since `T` may hold an `Rc`, so it is copied.
-//! - A slice cannot take part in a cycle: `Rc::new_cyclic` cannot reserve an unsized
-//!   allocation, so a back-edge into an `Rc<[T]>` still being built panics, `Weak` included.
-//! - A dangling `Weak<[T]>` costs an empty allocation, because `Weak::new` needs a `Sized`
-//!   pointee, so the only way to one is to downgrade a real allocation and drop it.
-//! - That `'static` propagates from [`TypeId`]: a generic type with an `Rc<..T..>` field needs
+//! - Unsized pointees vary. `Rc<str>` and its `CStr`, `OsStr`, and `Path` siblings share the
+//!   source's allocation, which nothing can observe. `Rc<[T]>` is copied but cannot join a
+//!   cycle. `Rc<dyn Trait>` can have no impl at all, so name [`deep_clone_unsized_rc`] at the
+//!   field with `#[deepclone(with = ..)]`.
+//! - The `'static` from [`TypeId`] propagates: a generic type with an `Rc<..T..>` field needs
 //!   `T: 'static` on its own declaration, which the derive does not add for you.
 //! - [`Cloner`] is neither `Send` nor `Sync`, so [`Cloner::arc`] is single-threaded.
 //! - Peak memory holds both copies, since the [`Cloner`] keeps every copy alive.
@@ -164,7 +151,8 @@
 //!
 //! # Prior art
 //!
-//! The `*mut ()` round-trip in [`deep_clone_box`] is David Tolnay's, from `dyn-clone`, and
+//! The `*mut ()` round-trip behind [`deep_clone_unsized_rc`] is David Tolnay's, from
+//! `dyn-clone`, and
 //! `oxc_allocator::CloneIn` is the precedent for a context-carrying clone trait. The README
 //! covers how this differs from the similarly named crates.
 
@@ -291,7 +279,7 @@ use std::{
 pub use deepclone_derive::DeepClone;
 use rustc_hash::FxHashMap;
 
-pub use crate::dyn_clone::{DynDeepClone, deep_clone_box};
+pub use crate::dyn_clone::{DynDeepClone, deep_clone_unsized_arc, deep_clone_unsized_rc};
 
 /// The forwarding table for one deep clone operation, mapping each source object's identity
 /// to its copy.
@@ -337,8 +325,8 @@ pub struct Cloner {
 	label = "no `DeepClone` impl",
 	note = "derive `DeepClone` on `{Self}` if you own it, or mark the field \
 	        `#[deepclone(clone)]` if a shallow clone is correct for it",
-	note = "`Rc<dyn Trait>` lands here by design, since a blanket impl would overlap every other \
-	        `Rc`. Write one with `Cloner::rc_unsized` and `deep_clone_box`"
+	note = "`Rc<dyn Trait>` lands here by design. Annotate the field with \
+	        `#[deepclone(with = deepclone::deep_clone_unsized_rc)]`"
 )]
 pub trait DeepClone {
 	/// Deep clone `self`. This is the method to call.

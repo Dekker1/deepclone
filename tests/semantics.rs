@@ -79,6 +79,38 @@ fn a_dangling_weak_clones_to_a_dangling_weak() {
 	assert!(copy.upgrade().is_none());
 }
 
+/// `Rc<dyn Trait>` cannot be given a `DeepClone` impl by anyone: `Rc` is not `#[fundamental]`,
+/// so the orphan rule forbids it downstream, and a blanket impl here would overlap every other
+/// `Rc`. Naming the clone at the field sidesteps the need for an impl at all.
+#[test]
+fn a_field_can_carry_an_rc_dyn_trait() {
+	#[derive(DeepClone)]
+	struct Solver {
+		#[deepclone(with = deepclone::deep_clone_unsized_rc)]
+		left: Rc<dyn Propagator>,
+		#[deepclone(with = deepclone::deep_clone_unsized_rc)]
+		right: Rc<dyn Propagator>,
+	}
+
+	let shared = Rc::new(RefCell::new(0));
+	let one: Rc<dyn Propagator> = Rc::new(Counter {
+		state: Rc::clone(&shared),
+		step: 1,
+	});
+	let original = Solver {
+		left: Rc::clone(&one),
+		right: Rc::clone(&one),
+	};
+
+	let copy = original.deep_clone();
+	copy.left.bump();
+
+	assert!(Rc::ptr_eq(&copy.left, &copy.right), "one new propagator");
+	assert!(!Rc::ptr_eq(&copy.left, &one));
+	assert_eq!(*copy.right.state().borrow(), 1);
+	assert_eq!(*shared.borrow(), 0, "the original is untouched");
+}
+
 #[test]
 #[should_panic(expected = "cycle of strong `Rc`/`Arc` edges")]
 fn a_strong_cycle_panics_rather_than_overflowing_the_stack() {
