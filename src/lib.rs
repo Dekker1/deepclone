@@ -167,117 +167,8 @@
 //! # Prior art
 //!
 //! The `*mut ()` round-trip in [`deep_clone_box`] is David Tolnay's, from `dyn-clone`, and
-//! `oxc_allocator::CloneIn` is the precedent for a context-carrying clone trait. Not to be
-//! confused with `ImplicitClone` or `dupe`, which are about cloning *cheaply*.
-
-mod dyn_clone;
-mod impls;
-
-use std::{
-	any::{Any, TypeId, type_name},
-	collections::HashMap,
-	fmt,
-	rc::{Rc, Weak as RcWeak},
-	sync::{Arc, Weak as ArcWeak},
-};
-
-#[cfg(feature = "derive")]
-pub use deepclone_derive::DeepClone;
-
-#[doc(hidden)]
-pub use crate::dyn_clone::__private;
-pub use crate::dyn_clone::{DynDeepClone, deep_clone_box};
-
-/// A clone that copies everything reachable, preserving the sharing among the copies: two
-/// references to one object become two references to one *new* object, and the copy shares
-/// nothing with the original.
-///
-/// Derive it. A hand-written impl must thread `cloner` into every field, since that is the
-/// only thing keeping shared objects shared.
-pub trait DeepClone {
-	/// Deep clone `self`. This is the method to call.
-	///
-	/// Each call gets its own [`Cloner`], so two calls never share copies with each other.
-	fn deep_clone(&self) -> Self
-	where
-		Self: Sized,
-	{
-		// The `Cloner` outlives the result's construction, so a copy that nothing else holds
-		// strongly deallocates only once this returns.
-		self.deep_clone_in(&mut Cloner::default())
-	}
-
-	/// Deep clone `self` through `cloner`. This is the method to implement, and the one to
-	/// call from inside another impl so that the whole copy shares one `Cloner`.
-	fn deep_clone_in(&self, cloner: &mut Cloner) -> Self;
-}
-
-/// The forwarding table for one deep clone operation, mapping each source object's identity
-/// to its copy.
-///
-/// [`DeepClone::deep_clone`] makes one per call, which is what you want. Construct one
-/// yourself only to clone several values against *one* `Cloner`:
-///
-/// ```
-/// # use std::{cell::RefCell, rc::Rc};
-/// use deepclone::{Cloner, DeepClone};
-///
-/// let shared = Rc::new(RefCell::new(1));
-/// let mut cloner = Cloner::default();
-/// let (left, right) = (
-///     shared.deep_clone_in(&mut cloner),
-///     shared.deep_clone_in(&mut cloner),
-/// );
-///
-/// assert!(Rc::ptr_eq(&left, &right));
-/// ```
-///
-/// Reusing a `Cloner` for an unrelated clone makes the two share copies, which is the bug
-/// this crate exists to prevent. When in doubt, make a new one.
-#[derive(Default)]
-pub struct Cloner {
-	/// The address alone would very likely do, since only whole heap allocations are keyed
-	/// and two live ones are disjoint, but the `TypeId` makes the downcasts below correct by
-	/// construction rather than by an argument about `Rc`'s private layout.
-	memo: HashMap<(TypeId, usize), Entry>,
-}
-
-impl fmt::Debug for Cloner {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		// The entries are `Box<dyn Any>`, so their count is all there is to report.
-		f.debug_struct("Cloner")
-			.field("copies", &self.memo.len())
-			.finish()
-	}
-}
-
-/// A memo table entry, which needs two states so that back-edges can be resolved.
-enum Entry {
-	/// A copy whose allocation `new_cyclic` has reserved but not yet initialised. Holds a
-	/// `Weak` to it, which is all a back-edge needs.
-	InProgress(Box<dyn Any>),
-	/// A finished copy, held strongly so that it stays alive for the rest of the operation
-	/// even if nothing in the copy points at it yet.
-	Done(Box<dyn Any>),
-}
-
-/// Read a memo entry back out at the type its key promises.
-fn stored<T: 'static>(entry: &dyn Any) -> &T {
-	entry
-		.downcast_ref::<T>()
-		.expect("memo entries are stored under a key carrying their own TypeId")
-}
-
-/// Report a cycle of strong edges, which cannot be copied and would have leaked anyway.
-#[cold]
-fn strong_cycle<T>() -> ! {
-	panic!(
-		"deep clone reached a cycle of strong `Rc`/`Arc` edges through `{}`; the copy of that \
-         object does not exist yet, so there is nothing to point at. Such a cycle also leaks \
-         in the original — use `Weak` for back-edges, which this crate does support.",
-		type_name::<T>(),
-	)
-}
+//! `oxc_allocator::CloneIn` is the precedent for a context-carrying clone trait. The README
+//! covers how this differs from the similarly named crates.
 
 /// Generate the memoized clone methods for one flavour of shared pointer.
 ///
@@ -351,6 +242,123 @@ macro_rules! shared_ptr_methods {
 			}
 		}
 	};
+}
+
+mod dyn_clone;
+mod impls;
+
+use std::{
+	any::{Any, TypeId, type_name},
+	collections::HashMap,
+	fmt,
+	rc::{Rc, Weak as RcWeak},
+	sync::{Arc, Weak as ArcWeak},
+};
+
+#[cfg(feature = "derive")]
+pub use deepclone_derive::DeepClone;
+
+#[doc(hidden)]
+pub use crate::dyn_clone::__private;
+pub use crate::dyn_clone::{DynDeepClone, deep_clone_box};
+
+/// The forwarding table for one deep clone operation, mapping each source object's identity
+/// to its copy.
+///
+/// [`DeepClone::deep_clone`] makes one per call, which is what you want. Construct one
+/// yourself only to clone several values against *one* `Cloner`:
+///
+/// ```
+/// # use std::{cell::RefCell, rc::Rc};
+/// use deepclone::{Cloner, DeepClone};
+///
+/// let shared = Rc::new(RefCell::new(1));
+/// let mut cloner = Cloner::default();
+/// let (left, right) = (
+///     shared.deep_clone_in(&mut cloner),
+///     shared.deep_clone_in(&mut cloner),
+/// );
+///
+/// assert!(Rc::ptr_eq(&left, &right));
+/// ```
+///
+/// Reusing a `Cloner` for an unrelated clone makes the two share copies, which is the bug
+/// this crate exists to prevent. When in doubt, make a new one.
+#[derive(Default)]
+pub struct Cloner {
+	/// The address alone would very likely do, since only whole heap allocations are keyed
+	/// and two live ones are disjoint, but the `TypeId` makes the downcasts below correct by
+	/// construction rather than by an argument about `Rc`'s private layout.
+	memo: HashMap<(TypeId, usize), Entry>,
+}
+
+/// A clone that copies everything reachable, preserving the sharing among the copies: two
+/// references to one object become two references to one *new* object, and the copy shares
+/// nothing with the original.
+///
+/// Derive it. A hand-written impl must thread `cloner` into every field, since that is the
+/// only thing keeping shared objects shared.
+#[diagnostic::on_unimplemented(
+	message = "`{Self}` cannot be deep cloned",
+	label = "no `DeepClone` impl",
+	note = "derive `DeepClone` on `{Self}` if you own it, or mark the field \
+	        `#[deepclone(clone)]` if a shallow clone is correct for it",
+	note = "`Rc<[T]>`, `Rc<str>`, and `Rc<dyn Trait>` land here by design: `Cloner::rc` keys the \
+	        memo on `TypeId`, so it needs `T: Sized + 'static`. Use `#[deepclone(clone)]` for them"
+)]
+pub trait DeepClone {
+	/// Deep clone `self`. This is the method to call.
+	///
+	/// Each call gets its own [`Cloner`], so two calls never share copies with each other.
+	fn deep_clone(&self) -> Self
+	where
+		Self: Sized,
+	{
+		// The `Cloner` outlives the result's construction, so a copy that nothing else holds
+		// strongly deallocates only once this returns.
+		self.deep_clone_in(&mut Cloner::default())
+	}
+
+	/// Deep clone `self` through `cloner`. This is the method to implement, and the one to
+	/// call from inside another impl so that the whole copy shares one `Cloner`.
+	fn deep_clone_in(&self, cloner: &mut Cloner) -> Self;
+}
+
+/// A memo table entry, which needs two states so that back-edges can be resolved.
+enum Entry {
+	/// A copy whose allocation `new_cyclic` has reserved but not yet initialised. Holds a
+	/// `Weak` to it, which is all a back-edge needs.
+	InProgress(Box<dyn Any>),
+	/// A finished copy, held strongly so that it stays alive for the rest of the operation
+	/// even if nothing in the copy points at it yet.
+	Done(Box<dyn Any>),
+}
+
+/// Read a memo entry back out at the type its key promises.
+fn stored<T: 'static>(entry: &dyn Any) -> &T {
+	entry
+		.downcast_ref::<T>()
+		.expect("memo entries are stored under a key carrying their own TypeId")
+}
+
+/// Report a cycle of strong edges, which cannot be copied and would have leaked anyway.
+#[cold]
+fn strong_cycle<T>() -> ! {
+	panic!(
+		"deep clone reached a cycle of strong `Rc`/`Arc` edges through `{}`; the copy of that \
+         object does not exist yet, so there is nothing to point at. Such a cycle also leaks \
+         in the original — use `Weak` for back-edges, which this crate does support.",
+		type_name::<T>(),
+	)
+}
+
+impl fmt::Debug for Cloner {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		// The entries are `Box<dyn Any>`, so their count is all there is to report.
+		f.debug_struct("Cloner")
+			.field("copies", &self.memo.len())
+			.finish()
+	}
 }
 
 shared_ptr_methods!(Rc, RcWeak, rc, rc_weak);

@@ -8,6 +8,112 @@ use syn::{
 	punctuated::Punctuated, spanned::Spanned,
 };
 
+/// How one field is cloned, after its `#[deepclone(..)]` attribute is applied.
+enum Strategy {
+	/// Recurse, threading the cloner. Anything reached through here keeps its sharing.
+	Deep,
+	/// Shallow `Clone::clone`, opted into explicitly at the field.
+	Clone,
+	/// A user-supplied `fn(&Field, &mut Cloner) -> Field`.
+	With(Path),
+	/// Ignore the source value entirely.
+	Default,
+}
+
+/// The pattern that binds a variant's fields, `{ a: field_a, .. }` or `(field_0, ..)`.
+fn bind_fields(fields: &Fields) -> TokenStream2 {
+	match fields {
+		Fields::Named(named) => {
+			let bindings = named.named.iter().map(|field| {
+				let name = field.ident.as_ref().expect("named field has an identifier");
+				let binding = binding_ident(&quote!(#name));
+				quote!(#name: #binding)
+			});
+			quote!({ #(#bindings,)* })
+		}
+		Fields::Unnamed(unnamed) => {
+			let bindings = (0..unnamed.unnamed.len()).map(|index| {
+				let index = Index::from(index);
+				binding_ident(&quote!(#index))
+			});
+			quote!((#(#bindings,)*))
+		}
+		Fields::Unit => quote!(),
+	}
+}
+
+/// The name a variant's field is bound to, so named and tuple variants share one builder.
+fn binding_ident(member: &TokenStream2) -> proc_macro2::Ident {
+	format_ident!("field_{}", member.to_string().replace(['.', ' '], "_"))
+}
+
+/// Build `ctor { .. }` / `ctor(..)` / `ctor` from a per-field accessor, where `ctor` is
+/// `Self` for a struct and `Self::Variant` for an enum variant.
+fn clone_fields(
+	ctor: &TokenStream2,
+	fields: &Fields,
+	access: &dyn Fn(TokenStream2) -> TokenStream2,
+) -> syn::Result<TokenStream2> {
+	Ok(match fields {
+		Fields::Named(named) => {
+			let values = named
+				.named
+				.iter()
+				.map(|field| {
+					let name = field.ident.as_ref().expect("named field has an identifier");
+					let value = field_expr(field, access(quote!(#name)))?;
+					Ok(quote!(#name: #value))
+				})
+				.collect::<syn::Result<Vec<_>>>()?;
+			quote!(#ctor { #(#values,)* })
+		}
+		Fields::Unnamed(unnamed) => {
+			let values = unnamed
+				.unnamed
+				.iter()
+				.enumerate()
+				.map(|(index, field)| {
+					let index = Index::from(index);
+					field_expr(field, access(quote!(#index)))
+				})
+				.collect::<syn::Result<Vec<_>>>()?;
+			quote!(#ctor(#(#values,)*))
+		}
+		Fields::Unit => quote!(#ctor),
+	})
+}
+
+/// Read a container-level `#[deepclone(bound = "..")]`, which replaces the generated bounds.
+fn container_bound(input: &DeriveInput) -> syn::Result<Option<WhereClause>> {
+	let mut bound = None;
+	for attr in input
+		.attrs
+		.iter()
+		.filter(|attr| attr.path().is_ident("deepclone"))
+	{
+		attr.parse_nested_meta(|meta| {
+			if !meta.path.is_ident("bound") {
+				return Err(meta
+					.error("unknown `deepclone` container attribute, expected `bound = \"..\"`"));
+			}
+			let Expr::Lit(syn::ExprLit {
+				lit: syn::Lit::Str(text),
+				..
+			}) = meta.value()?.parse::<Expr>()?
+			else {
+				return Err(meta.error("`bound` expects a string, as in `bound = \"T: Copy\"`"));
+			};
+			let predicates = text.parse_with(Punctuated::parse_terminated)?;
+			bound = Some(WhereClause {
+				where_token: Default::default(),
+				predicates,
+			});
+			Ok(())
+		})?;
+	}
+	Ok(bound)
+}
+
 /// Derive `DeepClone`, cloning every field through the same `Cloner`.
 ///
 /// Structs (named, tuple, and unit), enums, generics, and where-clauses are supported; unions
@@ -98,81 +204,6 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 	})
 }
 
-/// The name a variant's field is bound to, so named and tuple variants share one builder.
-fn binding_ident(member: &TokenStream2) -> proc_macro2::Ident {
-	format_ident!("field_{}", member.to_string().replace(['.', ' '], "_"))
-}
-
-/// The pattern that binds a variant's fields, `{ a: field_a, .. }` or `(field_0, ..)`.
-fn bind_fields(fields: &Fields) -> TokenStream2 {
-	match fields {
-		Fields::Named(named) => {
-			let bindings = named.named.iter().map(|field| {
-				let name = field.ident.as_ref().expect("named field has an identifier");
-				let binding = binding_ident(&quote!(#name));
-				quote!(#name: #binding)
-			});
-			quote!({ #(#bindings,)* })
-		}
-		Fields::Unnamed(unnamed) => {
-			let bindings = (0..unnamed.unnamed.len()).map(|index| {
-				let index = Index::from(index);
-				binding_ident(&quote!(#index))
-			});
-			quote!((#(#bindings,)*))
-		}
-		Fields::Unit => quote!(),
-	}
-}
-
-/// Build `ctor { .. }` / `ctor(..)` / `ctor` from a per-field accessor, where `ctor` is
-/// `Self` for a struct and `Self::Variant` for an enum variant.
-fn clone_fields(
-	ctor: &TokenStream2,
-	fields: &Fields,
-	access: &dyn Fn(TokenStream2) -> TokenStream2,
-) -> syn::Result<TokenStream2> {
-	Ok(match fields {
-		Fields::Named(named) => {
-			let values = named
-				.named
-				.iter()
-				.map(|field| {
-					let name = field.ident.as_ref().expect("named field has an identifier");
-					let value = field_expr(field, access(quote!(#name)))?;
-					Ok(quote!(#name: #value))
-				})
-				.collect::<syn::Result<Vec<_>>>()?;
-			quote!(#ctor { #(#values,)* })
-		}
-		Fields::Unnamed(unnamed) => {
-			let values = unnamed
-				.unnamed
-				.iter()
-				.enumerate()
-				.map(|(index, field)| {
-					let index = Index::from(index);
-					field_expr(field, access(quote!(#index)))
-				})
-				.collect::<syn::Result<Vec<_>>>()?;
-			quote!(#ctor(#(#values,)*))
-		}
-		Fields::Unit => quote!(#ctor),
-	})
-}
-
-/// How one field is cloned, after its `#[deepclone(..)]` attribute is applied.
-enum Strategy {
-	/// Recurse, threading the cloner. Anything reached through here keeps its sharing.
-	Deep,
-	/// Shallow `Clone::clone`, opted into explicitly at the field.
-	Clone,
-	/// A user-supplied `fn(&Field, &mut Cloner) -> Field`.
-	With(Path),
-	/// Ignore the source value entirely.
-	Default,
-}
-
 /// The expression cloning one field, spanned at the field so type errors land there.
 fn field_expr(field: &syn::Field, access: TokenStream2) -> syn::Result<TokenStream2> {
 	// Spanned at the field's type, so an unsatisfied bound names the offending field.
@@ -215,35 +246,4 @@ fn field_strategy(field: &syn::Field) -> syn::Result<Strategy> {
 		})?;
 	}
 	Ok(strategy.unwrap_or(Strategy::Deep))
-}
-
-/// Read a container-level `#[deepclone(bound = "..")]`, which replaces the generated bounds.
-fn container_bound(input: &DeriveInput) -> syn::Result<Option<WhereClause>> {
-	let mut bound = None;
-	for attr in input
-		.attrs
-		.iter()
-		.filter(|attr| attr.path().is_ident("deepclone"))
-	{
-		attr.parse_nested_meta(|meta| {
-			if !meta.path.is_ident("bound") {
-				return Err(meta
-					.error("unknown `deepclone` container attribute, expected `bound = \"..\"`"));
-			}
-			let Expr::Lit(syn::ExprLit {
-				lit: syn::Lit::Str(text),
-				..
-			}) = meta.value()?.parse::<Expr>()?
-			else {
-				return Err(meta.error("`bound` expects a string, as in `bound = \"T: Copy\"`"));
-			};
-			let predicates = text.parse_with(Punctuated::parse_terminated)?;
-			bound = Some(WhereClause {
-				where_token: Default::default(),
-				predicates,
-			});
-			Ok(())
-		})?;
-	}
-	Ok(bound)
 }

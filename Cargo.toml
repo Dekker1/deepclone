@@ -6,7 +6,7 @@ authors = ["Jip J. Dekker <jip@dekker.one>"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/dekker1/deepclone"
+repository = "https://github.com/Dekker1/deepclone"
 rust-version = "1.85"
 
 [package]
@@ -30,6 +30,17 @@ derive = ["dep:deepclone-derive"]
 # Pinned exactly: the derive expands to paths into this crate, so the pair must move
 # together.
 deepclone-derive = { version = "=0.1.0", path = "derive", optional = true }
+
+[dev-dependencies]
+divan = "0.1"
+trybuild = "1.0"
+
+[[bench]]
+name = "overhead"
+harness = false
+# The benchmark types use the derive, and a `harness = false` target still needs its `main`,
+# so skip the target entirely rather than emptying it with a `cfg`.
+required-features = ["derive"]
 
 [lints]
 workspace = true

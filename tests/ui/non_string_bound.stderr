@@ -1,0 +1,5 @@
+error: `bound` expects a string, as in `bound = "T: Copy"`
+ --> tests/ui/non_string_bound.rs:4:13
+  |
+4 | #[deepclone(bound = 7)]
+  |             ^^^^^^^^^

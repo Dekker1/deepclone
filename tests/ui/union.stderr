@@ -1,0 +1,5 @@
+error: `DeepClone` cannot be derived for unions, because which field is live is not known statically
+ --> tests/ui/union.rs:4:1
+  |
+4 | union Choice {
+  | ^^^^^

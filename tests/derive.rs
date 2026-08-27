@@ -19,21 +19,29 @@ use std::{
 use deepclone::{Cloner, DeepClone};
 
 #[derive(DeepClone)]
-struct Unit;
-
-#[derive(DeepClone)]
-struct Tuple(u32, Rc<RefCell<String>>, Rc<RefCell<String>>);
-
-#[test]
-fn tuple_structs() {
-	let shared = Rc::new(RefCell::new("a".to_owned()));
-	let copy = Tuple(1, Rc::clone(&shared), Rc::clone(&shared)).deep_clone();
-
-	assert_eq!(copy.0, 1);
-	assert!(Rc::ptr_eq(&copy.1, &copy.2));
-	assert!(!Rc::ptr_eq(&copy.1, &shared));
-	let _ = Unit.deep_clone();
+struct Attributes {
+	#[deepclone(clone)]
+	foreign: Foreign,
+	#[deepclone(with = double)]
+	doubled: u32,
+	#[deepclone(default)]
+	scratch: Vec<Foreign>,
 }
+
+/// A where-clause on the type must survive, and the generated `DeepClone` bounds are added to
+/// it rather than replacing it.
+#[derive(DeepClone)]
+struct Constrained<T>
+where
+	T: Copy + 'static,
+{
+	value: T,
+	shared: Rc<RefCell<T>>,
+}
+
+/// A foreign type with no `DeepClone` impl, standing in for the ones a user cannot implement.
+#[derive(Clone, Debug, PartialEq)]
+struct Foreign(u32);
 
 /// Plain data alongside shared data, which is the shape most real types have.
 #[derive(DeepClone)]
@@ -45,6 +53,32 @@ struct Mixed {
 	threaded: Arc<Mutex<u32>>,
 	marker: PhantomData<fn()>,
 }
+
+/// `T` is only ever cloned by `Clone`, so the default `T: DeepClone` bound would be too
+/// strong and has to be replaceable.
+#[derive(DeepClone)]
+#[deepclone(bound = "T: Clone")]
+struct Opaque<T> {
+	#[deepclone(clone)]
+	value: T,
+	shared: Rc<RefCell<u32>>,
+}
+
+#[derive(DeepClone)]
+enum Tree<T: 'static> {
+	Leaf,
+	Value(T),
+	Branch {
+		label: String,
+		children: Vec<Rc<RefCell<Tree<T>>>>,
+	},
+}
+
+#[derive(DeepClone)]
+struct Tuple(u32, Rc<RefCell<String>>, Rc<RefCell<String>>);
+
+#[derive(DeepClone)]
+struct Unit;
 
 #[test]
 fn a_mix_of_shared_and_plain_fields() {
@@ -72,14 +106,19 @@ fn a_mix_of_shared_and_plain_fields() {
 	assert!(!Arc::ptr_eq(&copy.threaded, &original.threaded));
 }
 
-#[derive(DeepClone)]
-enum Tree<T: 'static> {
-	Leaf,
-	Value(T),
-	Branch {
-		label: String,
-		children: Vec<Rc<RefCell<Tree<T>>>>,
-	},
+#[test]
+fn container_bound_override() {
+	let copy = Opaque {
+		value: Foreign(5),
+		shared: Rc::new(RefCell::new(1)),
+	}
+	.deep_clone();
+
+	assert_eq!(copy.value, Foreign(5));
+}
+
+fn double(value: &u32, _cloner: &mut Cloner) -> u32 {
+	value * 2
 }
 
 #[test]
@@ -103,48 +142,6 @@ fn enums_and_generics() {
 	let _ = Tree::Value(1_u32).deep_clone();
 }
 
-/// A where-clause on the type must survive, and the generated `DeepClone` bounds are added to
-/// it rather than replacing it.
-#[derive(DeepClone)]
-struct Constrained<T>
-where
-	T: Copy + 'static,
-{
-	value: T,
-	shared: Rc<RefCell<T>>,
-}
-
-#[test]
-fn where_clauses() {
-	let shared = Rc::new(RefCell::new(3_u32));
-	let copy = Constrained {
-		value: 3,
-		shared: Rc::clone(&shared),
-	}
-	.deep_clone();
-
-	assert_eq!(copy.value, 3);
-	assert!(!Rc::ptr_eq(&copy.shared, &shared));
-}
-
-/// A foreign type with no `DeepClone` impl, standing in for the ones a user cannot implement.
-#[derive(Clone, Debug, PartialEq)]
-struct Foreign(u32);
-
-fn double(value: &u32, _cloner: &mut Cloner) -> u32 {
-	value * 2
-}
-
-#[derive(DeepClone)]
-struct Attributes {
-	#[deepclone(clone)]
-	foreign: Foreign,
-	#[deepclone(with = double)]
-	doubled: u32,
-	#[deepclone(default)]
-	scratch: Vec<Foreign>,
-}
-
 #[test]
 fn field_attributes() {
 	let copy = Attributes {
@@ -162,25 +159,28 @@ fn field_attributes() {
 	);
 }
 
-/// `T` is only ever cloned by `Clone`, so the default `T: DeepClone` bound would be too
-/// strong and has to be replaceable.
-#[derive(DeepClone)]
-#[deepclone(bound = "T: Clone")]
-struct Opaque<T> {
-	#[deepclone(clone)]
-	value: T,
-	shared: Rc<RefCell<u32>>,
+#[test]
+fn tuple_structs() {
+	let shared = Rc::new(RefCell::new("a".to_owned()));
+	let copy = Tuple(1, Rc::clone(&shared), Rc::clone(&shared)).deep_clone();
+
+	assert_eq!(copy.0, 1);
+	assert!(Rc::ptr_eq(&copy.1, &copy.2));
+	assert!(!Rc::ptr_eq(&copy.1, &shared));
+	let _ = Unit.deep_clone();
 }
 
 #[test]
-fn container_bound_override() {
-	let copy = Opaque {
-		value: Foreign(5),
-		shared: Rc::new(RefCell::new(1)),
+fn where_clauses() {
+	let shared = Rc::new(RefCell::new(3_u32));
+	let copy = Constrained {
+		value: 3,
+		shared: Rc::clone(&shared),
 	}
 	.deep_clone();
 
-	assert_eq!(copy.value, Foreign(5));
+	assert_eq!(copy.value, 3);
+	assert!(!Rc::ptr_eq(&copy.shared, &shared));
 }
 
 /// The whole point, end to end: a solver whose propagators share mutable state, cloned through
@@ -190,34 +190,20 @@ mod solver {
 
 	use super::*;
 
-	trait Propagator: DynDeepClone {
-		fn propagate(&self);
-	}
-	deep_clone_trait_object!(Propagator);
-
 	#[derive(DeepClone)]
 	struct Bound {
 		state: Rc<RefCell<u32>>,
 		amount: u32,
 	}
 
-	impl Propagator for Bound {
-		fn propagate(&self) {
-			*self.state.borrow_mut() += self.amount;
-		}
+	trait Propagator: DynDeepClone {
+		fn propagate(&self);
 	}
 
 	#[derive(DeepClone)]
 	struct Solver {
 		propagators: Vec<Box<dyn Propagator>>,
 		shared: Rc<RefCell<u32>>,
-	}
-
-	// Coherence permits this alongside `DeepClone` precisely because there is no blanket impl.
-	impl Clone for Solver {
-		fn clone(&self) -> Self {
-			self.deep_clone()
-		}
 	}
 
 	#[test]
@@ -249,4 +235,19 @@ mod solver {
 		);
 		assert_eq!(*shared.borrow(), 0, "the original solver is untouched");
 	}
+
+	impl Propagator for Bound {
+		fn propagate(&self) {
+			*self.state.borrow_mut() += self.amount;
+		}
+	}
+
+	// Coherence permits this alongside `DeepClone` precisely because there is no blanket impl.
+	impl Clone for Solver {
+		fn clone(&self) -> Self {
+			self.deep_clone()
+		}
+	}
+
+	deep_clone_trait_object!(Propagator);
 }

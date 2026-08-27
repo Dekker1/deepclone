@@ -6,105 +6,6 @@
 //! A blanket impl instead runs into an unsize-coercion bound that creates a supertrait
 //! cycle.
 
-use std::ptr;
-
-use crate::{Cloner, DeepClone};
-
-/// Not public API: the names the macro expansion needs.
-///
-/// The expansion lands in the caller's crate, where `Box` may be shadowed or — in a `#![no_std]`
-/// caller — `::std` may not resolve at all. Routing through `$crate::` sidesteps both.
-#[doc(hidden)]
-pub mod __private {
-	pub use std::{
-		boxed::Box,
-		marker::{Send, Sync},
-	};
-}
-
-/// Machinery that keeps [`DynDeepClone`] closed to outside impls.
-#[expect(unnameable_types, reason = "being unnameable is what seals the trait")]
-mod sealed {
-	/// Prevents a hand-written [`DynDeepClone`](super::DynDeepClone) impl, which could return
-	/// a pointer to something other than a `Box<Self>` and make `deep_clone_box` unsound.
-	pub trait Sealed {}
-	impl<T: crate::DeepClone> Sealed for T {}
-
-	/// Makes the hidden trait method uncallable from outside this crate.
-	#[derive(Debug)]
-	pub struct Private;
-}
-use crate::dyn_clone::sealed::{Private, Sealed};
-
-/// Supertrait that lets a trait object be deep cloned.
-///
-/// Implemented for every [`DeepClone`] type; you never write an impl. Add it as a supertrait
-/// of your own trait, then invoke
-/// [`deep_clone_trait_object!`](crate::deep_clone_trait_object).
-pub trait DynDeepClone: Sealed {
-	/// Not public API.
-	#[doc(hidden)]
-	fn __deep_clone_box(&self, cloner: &mut Cloner, _: Private) -> *mut ();
-}
-
-impl<T: DeepClone> DynDeepClone for T {
-	fn __deep_clone_box(&self, cloner: &mut Cloner, _: Private) -> *mut () {
-		Box::<T>::into_raw(Box::new(self.deep_clone_in(cloner))).cast::<()>()
-	}
-}
-
-/// Deep clone a possibly unsized value into a `Box`, threading `cloner` through.
-///
-/// The dyn-compatible counterpart of [`DeepClone::deep_clone_in`]. Rarely called directly:
-/// [`deep_clone_trait_object!`](crate::deep_clone_trait_object) wraps it into the impl you
-/// actually want.
-pub fn deep_clone_box<T>(value: &T, cloner: &mut Cloner) -> Box<T>
-where
-	T: ?Sized + DynDeepClone,
-{
-	let mut fat_ptr = ptr::from_ref(value);
-	// SAFETY: `__deep_clone_box` is sealed, and its only impl returns `Box::into_raw` of a
-	// `Box<Concrete>` for the erased type behind `T`. Overwriting only the data half of the
-	// fat pointer therefore pairs that allocation with the metadata `value` already carried,
-	// which is correct because the copy has the same concrete type as the source. The
-	// assertion pins the assumption that the data pointer is the fat pointer's first word.
-	unsafe {
-		let data_ptr = ptr::addr_of_mut!(fat_ptr).cast::<*mut ()>();
-		assert_eq!(*data_ptr as *const (), ptr::from_ref(value).cast::<()>());
-		*data_ptr = T::__deep_clone_box(value, cloner, Private);
-	}
-	// SAFETY: `fat_ptr` now describes the `Box` allocated above, not reachable anywhere else.
-	unsafe { Box::from_raw(fat_ptr as *mut T) }
-}
-
-/// Implement [`DeepClone`] for `Box<dyn YourTrait>`.
-///
-/// `YourTrait` must have [`DynDeepClone`] as a supertrait. The `+ Send`, `+ Sync`, and
-/// `+ Send + Sync` variants of the trait object are covered too.
-///
-/// ```
-/// use deepclone::{DynDeepClone, deep_clone_trait_object};
-///
-/// trait Propagator: DynDeepClone {}
-/// deep_clone_trait_object!(Propagator);
-/// ```
-///
-/// Type parameters and where-clauses are supported, spelled as in `dyn-clone`:
-///
-/// ```
-/// use deepclone::{DynDeepClone, deep_clone_trait_object};
-/// use std::fmt::Debug;
-///
-/// trait Awkward<T>: DynDeepClone where T: Debug {}
-/// deep_clone_trait_object!(<T> Awkward<T> where T: Debug);
-/// ```
-#[macro_export]
-macro_rules! deep_clone_trait_object {
-    ($($path:tt)+) => {
-        $crate::__internal_deep_clone_trait_object!(begin $($path)+);
-    };
-}
-
 /// Not public API.
 ///
 /// Splits `<generics> Path<..> where ..` into its three parts one token at a time, because
@@ -177,4 +78,106 @@ macro_rules! __internal_deep_clone_trait_object {
             }
         }
     };
+}
+
+/// Implement [`DeepClone`] for `Box<dyn YourTrait>`.
+///
+/// `YourTrait` must have [`DynDeepClone`] as a supertrait. The `+ Send`, `+ Sync`, and
+/// `+ Send + Sync` variants of the trait object are covered too.
+///
+/// ```
+/// use deepclone::{DynDeepClone, deep_clone_trait_object};
+///
+/// trait Propagator: DynDeepClone {}
+/// deep_clone_trait_object!(Propagator);
+/// ```
+///
+/// Type parameters and where-clauses are supported, spelled as in `dyn-clone`:
+///
+/// ```
+/// use deepclone::{DynDeepClone, deep_clone_trait_object};
+/// use std::fmt::Debug;
+///
+/// trait Awkward<T>: DynDeepClone where T: Debug {}
+/// deep_clone_trait_object!(<T> Awkward<T> where T: Debug);
+/// ```
+#[macro_export]
+macro_rules! deep_clone_trait_object {
+    ($($path:tt)+) => {
+        $crate::__internal_deep_clone_trait_object!(begin $($path)+);
+    };
+}
+
+use std::ptr;
+
+use crate::{
+	Cloner, DeepClone,
+	dyn_clone::sealed::{Private, Sealed},
+};
+
+/// Supertrait that lets a trait object be deep cloned.
+///
+/// Implemented for every [`DeepClone`] type; you never write an impl. Add it as a supertrait
+/// of your own trait, then invoke
+/// [`deep_clone_trait_object!`](crate::deep_clone_trait_object).
+pub trait DynDeepClone: Sealed {
+	/// Not public API.
+	#[doc(hidden)]
+	fn __deep_clone_box(&self, cloner: &mut Cloner, _: Private) -> *mut ();
+}
+
+/// Deep clone a possibly unsized value into a `Box`, threading `cloner` through.
+///
+/// The dyn-compatible counterpart of [`DeepClone::deep_clone_in`]. Rarely called directly:
+/// [`deep_clone_trait_object!`](crate::deep_clone_trait_object) wraps it into the impl you
+/// actually want.
+pub fn deep_clone_box<T>(value: &T, cloner: &mut Cloner) -> Box<T>
+where
+	T: ?Sized + DynDeepClone,
+{
+	let mut fat_ptr = ptr::from_ref(value);
+	// SAFETY: `__deep_clone_box` is sealed, and its only impl returns `Box::into_raw` of a
+	// `Box<Concrete>` for the erased type behind `T`. Overwriting only the data half of the
+	// fat pointer therefore pairs that allocation with the metadata `value` already carried,
+	// which is correct because the copy has the same concrete type as the source. The
+	// assertion pins the assumption that the data pointer is the fat pointer's first word.
+	unsafe {
+		let data_ptr = ptr::addr_of_mut!(fat_ptr).cast::<*mut ()>();
+		assert_eq!(*data_ptr as *const (), ptr::from_ref(value).cast::<()>());
+		*data_ptr = T::__deep_clone_box(value, cloner, Private);
+	}
+	// SAFETY: `fat_ptr` now describes the `Box` allocated above, not reachable anywhere else.
+	unsafe { Box::from_raw(fat_ptr as *mut T) }
+}
+
+impl<T: DeepClone> DynDeepClone for T {
+	fn __deep_clone_box(&self, cloner: &mut Cloner, _: Private) -> *mut () {
+		Box::<T>::into_raw(Box::new(self.deep_clone_in(cloner))).cast::<()>()
+	}
+}
+
+/// Not public API: the names the macro expansion needs.
+///
+/// The expansion lands in the caller's crate, where `Box` may be shadowed or — in a `#![no_std]`
+/// caller — `::std` may not resolve at all. Routing through `$crate::` sidesteps both.
+#[doc(hidden)]
+pub mod __private {
+	pub use std::{
+		boxed::Box,
+		marker::{Send, Sync},
+	};
+}
+
+/// Machinery that keeps [`DynDeepClone`] closed to outside impls.
+#[expect(unnameable_types, reason = "being unnameable is what seals the trait")]
+mod sealed {
+	/// Makes the hidden trait method uncallable from outside this crate.
+	#[derive(Debug)]
+	pub struct Private;
+
+	/// Prevents a hand-written [`DynDeepClone`](super::DynDeepClone) impl, which could return
+	/// a pointer to something other than a `Box<Self>` and make `deep_clone_box` unsound.
+	pub trait Sealed {}
+
+	impl<T: crate::DeepClone> Sealed for T {}
 }

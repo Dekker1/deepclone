@@ -1,0 +1,5 @@
+error: unknown `deepclone` field attribute, expected `clone`, `default`, or `with`
+ --> tests/ui/unknown_field_attribute.rs:5:17
+  |
+5 |     #[deepclone(shallow)]
+  |                 ^^^^^^^

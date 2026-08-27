@@ -1,0 +1,5 @@
+error: conflicting `deepclone` field attributes
+ --> tests/ui/conflicting_field_attributes.rs:6:17
+  |
+6 |     #[deepclone(default)]
+  |                 ^^^^^^^

@@ -11,9 +11,16 @@
 use std::{
 	cell::RefCell,
 	rc::{Rc, Weak},
+	sync::{Arc, Mutex},
 };
 
 use deepclone::{Cloner, DeepClone, DynDeepClone, deep_clone_trait_object};
+
+#[derive(DeepClone)]
+struct Counter {
+	state: Rc<RefCell<u32>>,
+	step: u32,
+}
 
 #[derive(DeepClone)]
 struct Diamond {
@@ -21,40 +28,117 @@ struct Diamond {
 	right: Rc<RefCell<u32>>,
 }
 
+// The idiomatic Rust graph: strong edges down, weak edges back up.
+#[derive(DeepClone)]
+struct Node {
+	value: u32,
+	children: Vec<Rc<RefCell<Node>>>,
+	parent: Weak<RefCell<Node>>,
+}
+
+// A propagator-shaped extension point, which is the motivating case: the values live behind
+// trait objects, so the clone has to be dyn-compatible.
+trait Propagator: DynDeepClone {
+	fn bump(&self);
+
+	fn state(&self) -> Rc<RefCell<u32>>;
+}
+
+#[derive(DeepClone)]
+struct Shared(Arc<Mutex<u32>>);
+
+trait Threaded: DynDeepClone {
+	fn state(&self) -> Arc<Mutex<u32>>;
+}
+
 #[test]
-fn sharing_within_the_graph_is_preserved() {
-	let shared = Rc::new(RefCell::new(1));
-	let original = Diamond {
-		left: Rc::clone(&shared),
-		right: Rc::clone(&shared),
-	};
+fn a_dangling_weak_clones_to_a_dangling_weak() {
+	let source: Weak<RefCell<u32>> = Rc::downgrade(&Rc::new(RefCell::new(1)));
+	assert!(source.upgrade().is_none(), "the target dropped immediately");
 
-	let copy = original.deep_clone();
+	let copy = source.deep_clone();
+	assert!(copy.upgrade().is_none());
+}
 
+#[test]
+#[should_panic(expected = "cycle of strong `Rc`/`Arc` edges")]
+fn a_strong_cycle_panics_rather_than_overflowing_the_stack() {
+	#[derive(DeepClone)]
+	struct Looped {
+		next: RefCell<Option<Rc<Looped>>>,
+	}
+
+	let node = Rc::new(Looped {
+		next: RefCell::new(None),
+	});
+	*node.next.borrow_mut() = Some(Rc::clone(&node));
+
+	let _ = node.deep_clone();
+
+	// Break the cycle so the leak does not outlive the test, though the panic above means this
+	// is never reached.
+	*node.next.borrow_mut() = None;
+}
+
+#[test]
+fn a_weak_only_target_dies_with_the_memo() {
+	// Nothing in the copy holds the target strongly, so it must deallocate when the operation
+	// ends — exactly as it would have in the source graph.
+	let target = Rc::new(RefCell::new(1));
+	let source = Rc::downgrade(&target);
+
+	let copy = source.deep_clone();
 	assert!(
-		Rc::ptr_eq(&copy.left, &copy.right),
-		"the two fields must point at one new object"
+		copy.upgrade().is_none(),
+		"the memo's strong reference must not outlive the operation"
 	);
+	assert_eq!(Rc::strong_count(&target), 1, "the source is unaffected");
 	assert!(
-		!Rc::ptr_eq(&copy.left, &original.left),
-		"the new object must not be the old one"
+		source.upgrade().is_some(),
+		"the asymmetry the docs promise: the source's only strong owner sits outside what was \
+		 cloned, so it survives where the copy does not"
 	);
 }
 
 #[test]
-fn the_copy_is_independent_of_the_original() {
-	let shared = Rc::new(RefCell::new(1));
-	let original = Diamond {
-		left: Rc::clone(&shared),
-		right: Rc::clone(&shared),
+fn a_weak_visited_before_its_target_still_resolves() {
+	// `parent` is declared after `children` in `Node`, so reverse the graph to make the weak
+	// edge the first thing the clone encounters.
+	#[derive(DeepClone)]
+	struct Reversed {
+		first: Weak<RefCell<u32>>,
+		then: Rc<RefCell<u32>>,
+	}
+
+	let target = Rc::new(RefCell::new(7));
+	let original = Reversed {
+		first: Rc::downgrade(&target),
+		then: Rc::clone(&target),
 	};
 
 	let copy = original.deep_clone();
-	*copy.left.borrow_mut() = 2;
+	let upgraded = copy.first.upgrade().expect("the weak must resolve");
 
-	assert_eq!(*copy.right.borrow(), 2, "sharing survives inside the copy");
-	assert_eq!(*original.left.borrow(), 1, "the original is untouched");
-	assert_eq!(*shared.borrow(), 1);
+	assert!(Rc::ptr_eq(&upgraded, &copy.then), "one new target, not two");
+	assert!(!Rc::ptr_eq(&upgraded, &target));
+}
+
+/// Each auto-trait combination is a separate expansion of the macro, and so a separate route
+/// into `deep_clone_box`. An empty collection would never call it.
+#[test]
+fn auto_trait_variants_of_a_trait_object_are_covered() {
+	let shared = Arc::new(Mutex::new(0_u32));
+	let original: Vec<Box<dyn Threaded + Send + Sync>> = vec![
+		Box::new(Shared(Arc::clone(&shared))),
+		Box::new(Shared(Arc::clone(&shared))),
+	];
+
+	let copy = original.deep_clone();
+	*copy[0].state().lock().unwrap() = 7;
+
+	assert!(Arc::ptr_eq(&copy[0].state(), &copy[1].state()));
+	assert!(!Arc::ptr_eq(&copy[0].state(), &shared));
+	assert_eq!(*shared.lock().unwrap(), 0);
 }
 
 #[test]
@@ -98,28 +182,75 @@ fn refcount_of_the_source_is_unchanged() {
 	assert_eq!(Rc::strong_count(&copy.left), 2, "the copy's two fields");
 }
 
-// A propagator-shaped extension point, which is the motivating case: the values live behind
-// trait objects, so the clone has to be dyn-compatible.
-trait Propagator: DynDeepClone {
-	fn state(&self) -> Rc<RefCell<u32>>;
-	fn bump(&self);
-}
-deep_clone_trait_object!(Propagator);
+#[test]
+fn sharing_within_the_graph_is_preserved() {
+	let shared = Rc::new(RefCell::new(1));
+	let original = Diamond {
+		left: Rc::clone(&shared),
+		right: Rc::clone(&shared),
+	};
 
-#[derive(DeepClone)]
-struct Counter {
-	state: Rc<RefCell<u32>>,
-	step: u32,
+	let copy = original.deep_clone();
+
+	assert!(
+		Rc::ptr_eq(&copy.left, &copy.right),
+		"the two fields must point at one new object"
+	);
+	assert!(
+		!Rc::ptr_eq(&copy.left, &original.left),
+		"the new object must not be the old one"
+	);
 }
 
-impl Propagator for Counter {
-	fn state(&self) -> Rc<RefCell<u32>> {
-		Rc::clone(&self.state)
+#[test]
+fn the_copy_is_independent_of_the_original() {
+	let shared = Rc::new(RefCell::new(1));
+	let original = Diamond {
+		left: Rc::clone(&shared),
+		right: Rc::clone(&shared),
+	};
+
+	let copy = original.deep_clone();
+	*copy.left.borrow_mut() = 2;
+
+	assert_eq!(*copy.right.borrow(), 2, "sharing survives inside the copy");
+	assert_eq!(*original.left.borrow(), 1, "the original is untouched");
+	assert_eq!(*shared.borrow(), 1);
+}
+
+/// The `unsafe` in `deep_clone_box` reuses the source's vtable, so a heterogeneous collection
+/// is the case that would expose a mistake there.
+#[test]
+fn trait_objects_of_different_concrete_types_keep_their_own_behaviour() {
+	#[derive(DeepClone)]
+	struct Doubler(Rc<RefCell<u32>>);
+
+	impl Propagator for Doubler {
+		fn state(&self) -> Rc<RefCell<u32>> {
+			Rc::clone(&self.0)
+		}
+
+		fn bump(&self) {
+			let doubled = *self.0.borrow() * 2;
+			*self.0.borrow_mut() = doubled;
+		}
 	}
 
-	fn bump(&self) {
-		*self.state.borrow_mut() += self.step;
-	}
+	let shared = Rc::new(RefCell::new(3));
+	let original: Vec<Box<dyn Propagator>> = vec![
+		Box::new(Counter {
+			state: Rc::clone(&shared),
+			step: 4,
+		}),
+		Box::new(Doubler(Rc::clone(&shared))),
+	];
+
+	let copy = original.deep_clone();
+	copy[0].bump();
+	copy[1].bump();
+
+	assert_eq!(*copy[0].state().borrow(), 14, "3 + 4, then doubled");
+	assert_eq!(*shared.borrow(), 3);
 }
 
 #[test]
@@ -150,21 +281,6 @@ fn trait_objects_share_one_new_state() {
 		"both wrote to that one state"
 	);
 	assert_eq!(*shared.borrow(), 0, "the original solver is untouched");
-}
-
-#[test]
-fn auto_trait_variants_of_a_trait_object_are_covered() {
-	let original: Vec<Box<dyn Propagator + Send + Sync>> = vec![];
-	let copy = original.deep_clone();
-	assert!(copy.is_empty());
-}
-
-// The idiomatic Rust graph: strong edges down, weak edges back up.
-#[derive(DeepClone)]
-struct Node {
-	value: u32,
-	children: Vec<Rc<RefCell<Node>>>,
-	parent: Weak<RefCell<Node>>,
 }
 
 fn tree() -> Rc<RefCell<Node>> {
@@ -204,104 +320,21 @@ fn weak_back_edges_point_into_the_copy() {
 	assert_eq!(original.borrow().value, 1);
 }
 
-#[test]
-fn a_weak_visited_before_its_target_still_resolves() {
-	// `parent` is declared after `children` in `Node`, so reverse the graph to make the weak
-	// edge the first thing the clone encounters.
-	#[derive(DeepClone)]
-	struct Reversed {
-		first: Weak<RefCell<u32>>,
-		then: Rc<RefCell<u32>>,
+impl Propagator for Counter {
+	fn bump(&self) {
+		*self.state.borrow_mut() += self.step;
 	}
 
-	let target = Rc::new(RefCell::new(7));
-	let original = Reversed {
-		first: Rc::downgrade(&target),
-		then: Rc::clone(&target),
-	};
-
-	let copy = original.deep_clone();
-	let upgraded = copy.first.upgrade().expect("the weak must resolve");
-
-	assert!(Rc::ptr_eq(&upgraded, &copy.then), "one new target, not two");
-	assert!(!Rc::ptr_eq(&upgraded, &target));
-}
-
-#[test]
-fn a_dangling_weak_clones_to_a_dangling_weak() {
-	let source: Weak<RefCell<u32>> = Rc::downgrade(&Rc::new(RefCell::new(1)));
-	assert!(source.upgrade().is_none(), "the target dropped immediately");
-
-	let copy = source.deep_clone();
-	assert!(copy.upgrade().is_none());
-}
-
-#[test]
-fn a_weak_only_target_dies_with_the_memo() {
-	// Nothing in the copy holds the target strongly, so it must deallocate when the operation
-	// ends — exactly as it would have in the source graph.
-	let target = Rc::new(RefCell::new(1));
-	let source = Rc::downgrade(&target);
-
-	let copy = source.deep_clone();
-	assert!(
-		copy.upgrade().is_none(),
-		"the memo's strong reference must not outlive the operation"
-	);
-	assert_eq!(Rc::strong_count(&target), 1, "the source is unaffected");
-}
-
-#[test]
-#[should_panic(expected = "cycle of strong `Rc`/`Arc` edges")]
-fn a_strong_cycle_panics_rather_than_overflowing_the_stack() {
-	#[derive(DeepClone)]
-	struct Looped {
-		next: RefCell<Option<Rc<Looped>>>,
+	fn state(&self) -> Rc<RefCell<u32>> {
+		Rc::clone(&self.state)
 	}
-
-	let node = Rc::new(Looped {
-		next: RefCell::new(None),
-	});
-	*node.next.borrow_mut() = Some(Rc::clone(&node));
-
-	let _ = node.deep_clone();
-
-	// Break the cycle so the leak does not outlive the test, though the panic above means this
-	// is never reached.
-	*node.next.borrow_mut() = None;
 }
 
-/// The `unsafe` in `deep_clone_box` reuses the source's vtable, so a heterogeneous collection
-/// is the case that would expose a mistake there.
-#[test]
-fn trait_objects_of_different_concrete_types_keep_their_own_behaviour() {
-	#[derive(DeepClone)]
-	struct Doubler(Rc<RefCell<u32>>);
-
-	impl Propagator for Doubler {
-		fn state(&self) -> Rc<RefCell<u32>> {
-			Rc::clone(&self.0)
-		}
-
-		fn bump(&self) {
-			let doubled = *self.0.borrow() * 2;
-			*self.0.borrow_mut() = doubled;
-		}
+impl Threaded for Shared {
+	fn state(&self) -> Arc<Mutex<u32>> {
+		Arc::clone(&self.0)
 	}
-
-	let shared = Rc::new(RefCell::new(3));
-	let original: Vec<Box<dyn Propagator>> = vec![
-		Box::new(Counter {
-			state: Rc::clone(&shared),
-			step: 4,
-		}),
-		Box::new(Doubler(Rc::clone(&shared))),
-	];
-
-	let copy = original.deep_clone();
-	copy[0].bump();
-	copy[1].bump();
-
-	assert_eq!(*copy[0].state().borrow(), 14, "3 + 4, then doubled");
-	assert_eq!(*shared.borrow(), 3);
 }
+
+deep_clone_trait_object!(Propagator);
+deep_clone_trait_object!(Threaded);
