@@ -186,7 +186,7 @@ fn where_clauses() {
 /// The whole point, end to end: a solver whose propagators share mutable state, cloned through
 /// the `Clone` impl its users already call.
 mod solver {
-	use deepclone::{DynDeepClone, deep_clone_trait_object};
+	use deepclone::DynDeepClone;
 
 	use super::*;
 
@@ -248,6 +248,4 @@ mod solver {
 			self.deep_clone()
 		}
 	}
-
-	deep_clone_trait_object!(Propagator);
 }

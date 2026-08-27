@@ -14,7 +14,7 @@ use std::{
 	sync::{Arc, Mutex},
 };
 
-use deepclone::{Cloner, DeepClone, DynDeepClone, deep_clone_trait_object};
+use deepclone::{Cloner, DeepClone, DynDeepClone};
 
 #[derive(DeepClone)]
 struct Counter {
@@ -445,6 +445,3 @@ impl Threaded for Shared {
 		Arc::clone(&self.0)
 	}
 }
-
-deep_clone_trait_object!(Propagator);
-deep_clone_trait_object!(Threaded);

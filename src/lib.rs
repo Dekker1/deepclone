@@ -97,19 +97,17 @@
 //!
 //! # Trait objects
 //!
-//! [`DeepClone::deep_clone_in`] returns `Self`, so it is not dyn-compatible and cloning
-//! through a `Box<dyn Trait>` needs a boxed variant. Add [`DynDeepClone`] as a supertrait and
-//! invoke [`deep_clone_trait_object!`]:
+//! [`DeepClone::deep_clone_in`] returns `Self`, so it is not dyn-compatible. Naming
+//! [`DynDeepClone`] as a supertrait is all a trait needs for `Box<dyn Trait>` to deep clone,
+//! auto-trait variants included:
 //!
 //! ```
 //! # use std::{cell::RefCell, rc::Rc};
-//! use deepclone::{DeepClone, DynDeepClone, deep_clone_trait_object};
+//! use deepclone::{DeepClone, DynDeepClone};
 //!
 //! trait Propagator: DynDeepClone {
 //!     fn state(&self) -> Rc<RefCell<u32>>;
 //! }
-//! deep_clone_trait_object!(Propagator);
-//!
 //! #[derive(DeepClone)]
 //! struct Counter(Rc<RefCell<u32>>);
 //! impl Propagator for Counter {
@@ -293,8 +291,6 @@ use std::{
 pub use deepclone_derive::DeepClone;
 use rustc_hash::FxHashMap;
 
-#[doc(hidden)]
-pub use crate::dyn_clone::__private;
 pub use crate::dyn_clone::{DynDeepClone, deep_clone_box};
 
 /// The forwarding table for one deep clone operation, mapping each source object's identity

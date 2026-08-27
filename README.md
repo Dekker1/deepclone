@@ -34,7 +34,8 @@ assert_eq!(*copy.right.borrow(), 2);
 assert_eq!(*original.right.borrow(), 1);
 ```
 
-`Box<dyn Trait>` works too, and so do `Weak` back-edges and the cycles they form. See the
+`Box<dyn Trait>` works too, needing nothing but a `DynDeepClone` supertrait bound, and so do
+`Weak` back-edges and the cycles they form. See the
 [crate docs](https://docs.rs/deepclone) for those, for the
 [limits](https://docs.rs/deepclone#scope-and-what-is-not-supported), and for why there is
 deliberately no blanket `impl<T: Clone> DeepClone for T`.

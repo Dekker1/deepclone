@@ -173,7 +173,7 @@ use std::{
 	time::{Duration, Instant, SystemTime},
 };
 
-use crate::{Cloner, DeepClone};
+use crate::{Cloner, DeepClone, DynDeepClone, deep_clone_box};
 
 impl<K: DeepClone + Ord, V: DeepClone> DeepClone for BTreeMap<K, V> {
 	fn deep_clone_in(&self, cloner: &mut Cloner) -> Self {
@@ -193,15 +193,16 @@ impl<T: DeepClone> DeepClone for Bound<T> {
 	}
 }
 
-impl<T: DeepClone> DeepClone for Box<T> {
+/// Every `Box` goes through the dyn-compatible path, which covers `Box<dyn Trait>` and its
+/// auto-trait variants without the trait's author writing anything but the supertrait bound.
+impl<T: ?Sized + DynDeepClone> DeepClone for Box<T> {
 	fn deep_clone_in(&self, cloner: &mut Cloner) -> Self {
-		// Explicitly through the pointee, since `self.deep_clone_in(..)` would find this impl.
-		Box::new((**self).deep_clone_in(cloner))
+		deep_clone_box(&**self, cloner)
 	}
 }
 
-/// Written out rather than routed through [`deep_clone_box`](crate::deep_clone_box), so the
-/// crate's `unsafe` is reached only by trait objects.
+/// `[T]` has no [`DeepClone`] impl and so no [`DynDeepClone`] one either, which is what keeps
+/// this from colliding with the blanket `Box` impl above.
 impl<T: DeepClone> DeepClone for Box<[T]> {
 	fn deep_clone_in(&self, cloner: &mut Cloner) -> Self {
 		self.iter()
