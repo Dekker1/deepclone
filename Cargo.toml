@@ -3,7 +3,7 @@ members = ["derive"]
 
 [workspace.package]
 authors = ["Jip J. Dekker <jip@dekker.one>"]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Dekker1/deepclone"
@@ -29,7 +29,7 @@ derive = ["dep:deepclone-derive"]
 [dependencies]
 # Pinned exactly: the derive expands to paths into this crate, so the pair must move
 # together.
-deepclone-derive = { version = "=0.2.0", path = "derive", optional = true }
+deepclone-derive = { version = "=0.3.0", path = "derive", optional = true }
 rustc-hash = "2.1"
 
 [dev-dependencies]
