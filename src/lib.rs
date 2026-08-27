@@ -144,8 +144,15 @@
 //! One [`Cloner`] is one clone operation, and [`DeepClone::deep_clone`] makes a fresh one per
 //! call. Reusing one for an unrelated clone is the one way to make two copies share again.
 //!
-//! - [`Cloner::rc`] and friends need `T: Sized + 'static`, so `Rc<dyn Trait>`, `Rc<[T]>`, and
-//!   `Rc<str>` are not tracked. Use `#[deepclone(clone)]` for those.
+//! - `Rc<dyn Trait>` needs an impl of your own, written with [`Cloner::rc_unsized`] and
+//!   [`deep_clone_box`]. A blanket one would overlap every other `Rc` impl.
+//! - `Rc<str>`, `Rc<CStr>`, `Rc<OsStr>`, and `Rc<Path>` share the source's allocation instead
+//!   of copying it. Nothing in them can hide interior mutability, so this is unobservable and
+//!   saves the copy. `Rc<[T]>` cannot do the same, since `T` may hold an `Rc`, so it is copied.
+//! - A slice cannot take part in a cycle: `Rc::new_cyclic` cannot reserve an unsized
+//!   allocation, so a back-edge into an `Rc<[T]>` still being built panics, `Weak` included.
+//! - A dangling `Weak<[T]>` costs an empty allocation, because `Weak::new` needs a `Sized`
+//!   pointee, so the only way to one is to downgrade a real allocation and drop it.
 //! - That `'static` propagates from [`TypeId`]: a generic type with an `Rc<..T..>` field needs
 //!   `T: 'static` on its own declaration, which the derive does not add for you.
 //! - [`Cloner`] is neither `Send` nor `Sync`, so [`Cloner::arc`] is single-threaded.
@@ -168,7 +175,7 @@
 /// `Rc` and `Arc` differ only in their type names here, but they are distinct types with
 /// distinct `Weak` companions, so the pair cannot be written generically.
 macro_rules! shared_ptr_methods {
-	($strong:ident, $weak:ident, $strong_fn:ident, $weak_fn:ident) => {
+	($strong:ident, $weak:ident, $strong_fn:ident, $weak_fn:ident, $unsized_fn:ident) => {
 		impl Cloner {
 			#[doc = concat!("Deep clone `", stringify!($strong), "<T>` through the cloner.")]
 			///
@@ -187,6 +194,7 @@ macro_rules! shared_ptr_methods {
 				match self.memo.get(&key) {
 					Some(Entry::Done(copy)) => return $strong::clone(stored(&**copy)),
 					Some(Entry::InProgress(_)) => strong_cycle::<T>(),
+					Some(Entry::Unreserved) => unreserved_cycle::<T>(),
 					None => {}
 				}
 				let copy = $strong::new_cyclic(|shell: &$weak<T>| {
@@ -199,6 +207,39 @@ macro_rules! shared_ptr_methods {
 					// pointer type itself and recurse forever.
 					(**src).deep_clone_in(self)
 				});
+				let _ = self
+					.memo
+					.insert(key, Entry::Done(Box::new($strong::clone(&copy))));
+				copy
+			}
+
+			#[doc = concat!("Deep clone an unsized `", stringify!($strong), "<U>` through the cloner.")]
+			///
+			/// `build` produces the copy. This is separate from
+			#[doc = concat!("[`", stringify!($strong_fn), "`](Self::", stringify!($strong_fn), ")")]
+			/// because `new_cyclic` cannot reserve an unsized allocation, so the copy has no
+			/// address until `build` returns. Use it to support an `Rc<dyn YourTrait>` of your own.
+			///
+			/// # Panics
+			///
+			/// If the pointee is reached again while `build` is still running, by any edge,
+			/// including a `Weak` one.
+			pub fn $unsized_fn<U: ?Sized + 'static>(
+				&mut self,
+				src: &$strong<U>,
+				build: impl FnOnce(&mut Self) -> $strong<U>,
+			) -> $strong<U> {
+				let key = (
+					TypeId::of::<U>(),
+					$strong::as_ptr(src).cast::<()>() as usize,
+				);
+				match self.memo.get(&key) {
+					Some(Entry::Done(copy)) => return $strong::clone(stored(&**copy)),
+					Some(Entry::InProgress(_) | Entry::Unreserved) => unreserved_cycle::<U>(),
+					None => {}
+				}
+				let _ = self.memo.insert(key, Entry::Unreserved);
+				let copy = build(self);
 				let _ = self
 					.memo
 					.insert(key, Entry::Done(Box::new($strong::clone(&copy))));
@@ -229,6 +270,7 @@ macro_rules! shared_ptr_methods {
 					return match entry {
 						Entry::Done(copy) => $strong::downgrade(stored(&**copy)),
 						Entry::InProgress(shell) => stored::<$weak<T>>(&**shell).clone(),
+						Entry::Unreserved => unreserved_cycle::<T>(),
 					};
 				}
 				$strong::downgrade(&self.$strong_fn(&strong))
@@ -284,7 +326,7 @@ pub struct Cloner {
 	/// construction rather than by an argument about `Rc`'s private layout.
 	///
 	/// FxHash because the keys are addresses, not attacker-chosen, and `SipHash` costs about
-	/// 30% of the per-`Rc` price.
+	/// a third of the per-`Rc` price.
 	memo: FxHashMap<(TypeId, usize), Entry>,
 }
 
@@ -299,9 +341,8 @@ pub struct Cloner {
 	label = "no `DeepClone` impl",
 	note = "derive `DeepClone` on `{Self}` if you own it, or mark the field \
 	        `#[deepclone(clone)]` if a shallow clone is correct for it",
-	note = "`Rc<[T]>`, `Rc<str>`, and `Rc<dyn Trait>` land here by design: `Cloner::rc` keys the \
-	        cloner on `TypeId`, so it needs `T: Sized + 'static`. Use `#[deepclone(clone)]` for \
-	        them"
+	note = "`Rc<dyn Trait>` lands here by design, since a blanket impl would overlap every other \
+	        `Rc`. Write one with `Cloner::rc_unsized` and `deep_clone_box`"
 )]
 pub trait DeepClone {
 	/// Deep clone `self`. This is the method to call.
@@ -326,6 +367,9 @@ enum Entry {
 	/// A copy whose allocation `new_cyclic` has reserved but not yet initialised. Holds a
 	/// `Weak` to it, which is all a back-edge needs.
 	InProgress(Box<dyn Any>),
+	/// An unsized copy under construction. `new_cyclic` cannot reserve an unsized allocation,
+	/// so there is no address yet and nothing a back-edge could be given.
+	Unreserved,
 	/// A finished copy, held strongly so that it stays alive for the rest of the operation
 	/// even if nothing in the copy points at it yet.
 	Done(Box<dyn Any>),
@@ -340,11 +384,22 @@ fn stored<T: 'static>(entry: &dyn Any) -> &T {
 
 /// Report a cycle of strong edges, which cannot be copied and would have leaked anyway.
 #[cold]
-fn strong_cycle<T>() -> ! {
+fn strong_cycle<T: ?Sized>() -> ! {
 	panic!(
 		"deep clone reached a cycle of strong `Rc`/`Arc` edges through `{}`; the copy of that \
 		 object does not exist yet, so there is nothing to point at. Such a cycle also leaks \
 		 in the original — use `Weak` for back-edges, which this crate does support.",
+		type_name::<T>(),
+	)
+}
+
+/// Report a back-edge into an unsized allocation, which has no address until it is built.
+#[cold]
+fn unreserved_cycle<T: ?Sized>() -> ! {
+	panic!(
+		"deep clone reached `{}` while its own copy was still being built. `Rc::new_cyclic` \
+		 cannot reserve an unsized allocation, so a slice cannot take part in a cycle, not even \
+		 through `Weak`.",
 		type_name::<T>(),
 	)
 }
@@ -358,5 +413,5 @@ impl fmt::Debug for Cloner {
 	}
 }
 
-shared_ptr_methods!(Rc, RcWeak, rc, rc_weak);
-shared_ptr_methods!(Arc, ArcWeak, arc, arc_weak);
+shared_ptr_methods!(Rc, RcWeak, rc, rc_weak, rc_unsized);
+shared_ptr_methods!(Arc, ArcWeak, arc, arc_weak, arc_unsized);

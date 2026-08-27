@@ -44,6 +44,27 @@ macro_rules! copy_wrapper {
 	)*};
 }
 
+/// Byte-backed slices behind a shared pointer, where the copy shares the original's
+/// allocation.
+///
+/// Nothing in these can hide interior mutability, so sharing is unobservable, and it beats
+/// copying on every count: no allocation, and two fields on one source stay on one copy.
+macro_rules! immutable_slice {
+	($($ty:ty),* $(,)?) => {$(
+		impl DeepClone for Rc<$ty> {
+			fn deep_clone_in(&self, _cloner: &mut Cloner) -> Self {
+				Rc::clone(self)
+			}
+		}
+
+		impl DeepClone for Arc<$ty> {
+			fn deep_clone_in(&self, _cloner: &mut Cloner) -> Self {
+				Arc::clone(self)
+			}
+		}
+	)*};
+}
+
 /// Deferred initialisation, which the copy reproduces: an unset source stays unset.
 macro_rules! once {
     ($($ty:ident),*) => {$(
@@ -81,6 +102,33 @@ macro_rules! shared {
             }
         }
     )*};
+}
+
+/// `[T]` cannot take the shortcut above, since `T` may hold an `Rc` or a `RefCell`, so the
+/// copy is built element by element through the cloner.
+macro_rules! shared_slice {
+	($($strong:ident, $weak:ident => $method:ident),* $(,)?) => {$(
+		impl<T: DeepClone + 'static> DeepClone for $strong<[T]> {
+			fn deep_clone_in(&self, cloner: &mut Cloner) -> Self {
+				cloner.$method(self, |cloner| {
+					self.iter().map(|value| value.deep_clone_in(cloner)).collect()
+				})
+			}
+		}
+
+		impl<T: DeepClone + 'static> DeepClone for $weak<[T]> {
+			fn deep_clone_in(&self, cloner: &mut Cloner) -> Self {
+				let Some(strong) = self.upgrade() else {
+					// `Weak::new` needs a `Sized` pointee, so the only way to a dangling
+					// `Weak<[T]>` is to downgrade a real allocation and let it drop. The empty
+					// slice costs the two counters, held until this `Weak` itself is dropped.
+					let empty: $strong<[T]> = $strong::from(Vec::new());
+					return $strong::downgrade(&empty);
+				};
+				$strong::downgrade(&strong.deep_clone_in(cloner))
+			}
+		}
+	)*};
 }
 
 /// Tuples, up to the arity the standard library's own traits stop at.
@@ -303,6 +351,10 @@ impl<T: DeepClone, const N: usize> DeepClone for [T; N] {
 		std::array::from_fn(|index| self[index].deep_clone_in(cloner))
 	}
 }
+
+immutable_slice!(str, CStr, OsStr, Path);
+
+shared_slice!(Rc, RcWeak => rc_unsized, Arc, ArcWeak => arc_unsized);
 
 atomic! {
 	(), bool, char, Infallible, Ordering, PhantomPinned, RangeFull, TypeId,

@@ -51,6 +51,25 @@ trait Threaded: DynDeepClone {
 	fn state(&self) -> Arc<Mutex<u32>>;
 }
 
+/// A slice cannot take part in a cycle even through `Weak`, because `Rc::new_cyclic` cannot
+/// reserve an unsized allocation, so there is no address to hand the back-edge.
+#[test]
+#[should_panic(expected = "cannot reserve an unsized allocation")]
+fn a_back_edge_into_a_slice_panics() {
+	#[derive(DeepClone)]
+	struct Element {
+		back: RefCell<Weak<[Element]>>,
+	}
+
+	let empty: Rc<[Element]> = Rc::from(Vec::new());
+	let slice: Rc<[Element]> = Rc::from(vec![Element {
+		back: RefCell::new(Rc::downgrade(&empty)),
+	}]);
+	*slice[0].back.borrow_mut() = Rc::downgrade(&slice);
+
+	let _ = slice.deep_clone();
+}
+
 #[test]
 fn a_dangling_weak_clones_to_a_dangling_weak() {
 	let source: Weak<RefCell<u32>> = Rc::downgrade(&Rc::new(RefCell::new(1)));
@@ -158,6 +177,31 @@ fn each_operation_gets_its_own_memo() {
 	);
 }
 
+/// `Rc<str>` shares rather than copies, which is unobservable because `str` cannot hide
+/// interior mutability, and keeps two fields on one source pointing at one copy.
+#[test]
+fn immutable_slices_share_the_source_allocation() {
+	#[derive(DeepClone)]
+	struct Holder {
+		left: Rc<str>,
+		right: Rc<str>,
+	}
+
+	let shared: Rc<str> = Rc::from("solver");
+	let original = Holder {
+		left: Rc::clone(&shared),
+		right: Rc::clone(&shared),
+	};
+
+	let copy = original.deep_clone();
+
+	assert!(Rc::ptr_eq(&copy.left, &copy.right));
+	assert!(
+		Rc::ptr_eq(&copy.left, &shared),
+		"no reason to copy the bytes"
+	);
+}
+
 #[test]
 fn one_cloner_can_span_several_values() {
 	let shared = Rc::new(RefCell::new(1));
@@ -200,6 +244,38 @@ fn sharing_within_the_graph_is_preserved() {
 		!Rc::ptr_eq(&copy.left, &original.left),
 		"the new object must not be the old one"
 	);
+}
+
+/// `Rc<[T]>` cannot share, since `T` may hold interior mutability, so it is copied through the
+/// cloner like any other shared pointer.
+#[test]
+fn slices_are_copied_and_keep_their_sharing() {
+	#[derive(DeepClone)]
+	struct Holder {
+		left: Rc<[RefCell<u32>]>,
+		right: Rc<[RefCell<u32>]>,
+	}
+
+	let shared: Rc<[RefCell<u32>]> = Rc::from(vec![RefCell::new(1), RefCell::new(2)]);
+	let original = Holder {
+		left: Rc::clone(&shared),
+		right: Rc::clone(&shared),
+	};
+
+	let copy = original.deep_clone();
+	*copy.left[0].borrow_mut() = 99;
+
+	assert!(
+		Rc::ptr_eq(&copy.left, &copy.right),
+		"one new slice, not two"
+	);
+	assert!(!Rc::ptr_eq(&copy.left, &shared));
+	assert_eq!(
+		*copy.right[0].borrow(),
+		99,
+		"sharing survives inside the copy"
+	);
+	assert_eq!(*shared[0].borrow(), 1, "the original is untouched");
 }
 
 #[test]
@@ -318,6 +394,40 @@ fn weak_back_edges_point_into_the_copy() {
 
 	copy.borrow_mut().value = 99;
 	assert_eq!(original.borrow().value, 1);
+}
+
+/// A `Weak<[T]>` resolves like any other back-edge when its target is not itself under
+/// construction, and dangles when the source did.
+#[test]
+fn weak_slices_resolve_and_dangle() {
+	#[derive(DeepClone)]
+	struct Holder {
+		strong: Rc<[u32]>,
+		weak: Weak<[u32]>,
+	}
+
+	let target: Rc<[u32]> = Rc::from(vec![1, 2, 3]);
+	let original = Holder {
+		strong: Rc::clone(&target),
+		weak: Rc::downgrade(&target),
+	};
+
+	let copy = original.deep_clone();
+	let upgraded = copy.weak.upgrade().expect("the target is held by `strong`");
+
+	assert!(
+		Rc::ptr_eq(&upgraded, &copy.strong),
+		"one new slice, not two"
+	);
+	assert!(!Rc::ptr_eq(&upgraded, &target));
+
+	// A source that already dangled clones to one that dangles too.
+	let dangling: Weak<[u32]> = {
+		let empty: Rc<[u32]> = Rc::from(Vec::new());
+		Rc::downgrade(&empty)
+	};
+	assert!(dangling.upgrade().is_none());
+	assert!(dangling.deep_clone().upgrade().is_none());
 }
 
 impl Propagator for Counter {

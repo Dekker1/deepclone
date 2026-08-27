@@ -56,7 +56,8 @@ Two crates share this one's trait name, and one of them has the opposite semanti
   changing its semantics. This crate borrows its `*mut ()` technique.
 - `ImplicitClone` and `dupe` are about cloning *cheaply*, not deeply.
 - [`fory`](https://crates.io/crates/fory) tracks `Rc`/`Arc` identity and cycles across a
-  serialize and deserialize round-trip, and handles the `Rc<dyn Trait>` this crate does not.
+  serialize and deserialize round-trip, and handles `Rc<dyn Trait>` without an impl of your
+  own.
   Worth considering if you already have `Serialize`/`Deserialize` bounds.
 
 ## What it costs
@@ -66,13 +67,13 @@ Medians from `cargo bench -- --sample-count 1000` on an Apple M4.
 | | `Clone` | `deep_clone` | naive deep clone |
 |---|---|---|---|
 | A struct with no shared pointers | ~105 ns | ~105 ns | n/a |
-| 16 nodes sharing a 64-node subtree | n/a | **5.4 µs** | 23.5 µs |
-| A chain of 256 unique nodes | n/a | 18.5 µs | **6.1 µs** |
+| 16 nodes sharing a 64-node subtree | n/a | **4.9 µs** | 22.7 µs |
+| A chain of 256 unique nodes | n/a | 16.7 µs | **5.7 µs** |
 
 `n/a` marks what a column cannot do: `Clone` never makes an independent copy, and with no
 shared pointers a naive deep clone is this one.
 
-The trade against a naive deep clone is one hash and one insert per `Rc`, about 50 ns, in
+The trade against a naive deep clone is one hash and one insert per `Rc`, about 45 ns, in
 exchange for skipping every repeated visit to a shared object. The more sharing, the further
 ahead this gets; with none, it is a straight loss.
 
