@@ -8,6 +8,15 @@ use syn::{
 	punctuated::Punctuated, spanned::Spanned,
 };
 
+/// What the `#[deepclone(..)]` attributes on the type itself ask for.
+#[derive(Default)]
+struct Container {
+	/// Replaces the generated bounds outright.
+	bound: Option<WhereClause>,
+	/// Clone the whole value shallowly rather than field by field.
+	clone: bool,
+}
+
 /// How one field is cloned, after its `#[deepclone(..)]` attribute is applied.
 enum Strategy {
 	/// Recurse, threading the cloner. Anything reached through here keeps its sharing.
@@ -84,17 +93,22 @@ fn clone_fields(
 }
 
 /// Read a container-level `#[deepclone(bound = "..")]`, which replaces the generated bounds.
-fn container_bound(input: &DeriveInput) -> syn::Result<Option<WhereClause>> {
-	let mut bound = None;
+fn container_attrs(input: &DeriveInput) -> syn::Result<Container> {
+	let mut container = Container::default();
 	for attr in input
 		.attrs
 		.iter()
 		.filter(|attr| attr.path().is_ident("deepclone"))
 	{
 		attr.parse_nested_meta(|meta| {
+			if meta.path.is_ident("clone") {
+				container.clone = true;
+				return Ok(());
+			}
 			if !meta.path.is_ident("bound") {
-				return Err(meta
-					.error("unknown `deepclone` container attribute, expected `bound = \"..\"`"));
+				return Err(meta.error(
+					"unknown `deepclone` container attribute, expected `clone` or `bound = \"..\"`",
+				));
 			}
 			let Expr::Lit(syn::ExprLit {
 				lit: syn::Lit::Str(text),
@@ -104,20 +118,20 @@ fn container_bound(input: &DeriveInput) -> syn::Result<Option<WhereClause>> {
 				return Err(meta.error("`bound` expects a string, as in `bound = \"T: Copy\"`"));
 			};
 			let predicates = text.parse_with(Punctuated::parse_terminated)?;
-			bound = Some(WhereClause {
+			container.bound = Some(WhereClause {
 				where_token: Default::default(),
 				predicates,
 			});
 			Ok(())
 		})?;
 	}
-	Ok(bound)
+	Ok(container)
 }
 
 /// Derive `DeepClone`, cloning every field through the same `Cloner`.
 ///
-/// Structs (named, tuple, and unit), enums, generics, and where-clauses are supported; unions
-/// are not. Every type parameter gains a `DeepClone` bound, as `derive(Clone)` adds a `Clone`
+/// Structs (named, tuple, and unit), enums, generics, and where-clauses are supported. Unions
+/// are not, unless `#[deepclone(clone)]` makes the fields irrelevant. Every type parameter gains a `DeepClone` bound, as `derive(Clone)` adds a `Clone`
 /// bound.
 ///
 /// Nothing here inspects field types: `Rc` and `Arc` reach the cloner through their own
@@ -136,6 +150,10 @@ fn container_bound(input: &DeriveInput) -> syn::Result<Option<WhereClause>> {
 ///
 /// # Container attributes
 ///
+/// - `#[deepclone(clone)]` — clone the whole value with `Clone::clone` instead of field by
+///   field. The right answer for a type that reaches nothing shared, since it asks nothing of
+///   the field types, so they need no `DeepClone` impl of their own. Bounds each type
+///   parameter by `Clone` rather than `DeepClone`.
 /// - `#[deepclone(bound = "T: MyBound")]` — replace the generated bounds, for when a
 ///   `DeepClone` bound on every parameter is too strong.
 #[proc_macro_derive(DeepClone, attributes(deepclone))]
@@ -148,47 +166,72 @@ pub fn derive_deep_clone(input: TokenStream) -> TokenStream {
 
 /// Build the `DeepClone` impl, or the error to report in its place.
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
-	let body = match &input.data {
-		Data::Struct(data) => {
-			clone_fields(&quote!(Self), &data.fields, &|member| quote!(&self.#member))?
-		}
-		Data::Enum(data) => {
-			let arms = data
-				.variants
-				.iter()
-				.map(|variant| {
-					let name = &variant.ident;
-					let bindings = bind_fields(&variant.fields);
-					let fields = clone_fields(&quote!(Self::#name), &variant.fields, &|member| {
-						let binding = binding_ident(&member);
-						quote!(#binding)
-					})?;
-					Ok(quote!(Self::#name #bindings => #fields))
-				})
-				.collect::<syn::Result<Vec<_>>>()?;
-			// An enum with no variants is uninhabited, so `match` on it needs no arms.
-			quote!(match self { #(#arms,)* })
-		}
-		Data::Union(data) => {
+	let container = container_attrs(input)?;
+	if container.clone {
+		// The fields are never visited below, so an attribute on one would do nothing.
+		if let Some(field) = fields_of(&input.data)
+			.into_iter()
+			.find(|field| field.attrs.iter().any(|a| a.path().is_ident("deepclone")))
+		{
 			return Err(syn::Error::new(
-				data.union_token.span(),
-				"`DeepClone` cannot be derived for unions, because which field is live is not \
-                 known statically",
+				field.span(),
+				"`#[deepclone(clone)]` on the type already clones every field, so a field \
+				 attribute here would have no effect",
 			));
+		}
+	}
+	// A whole-type `clone` never looks at the fields, so it works for any shape, unions
+	// included, and asks nothing of the field types.
+	let body = if container.clone {
+		quote!(::core::clone::Clone::clone(self))
+	} else {
+		match &input.data {
+			Data::Struct(data) => {
+				clone_fields(&quote!(Self), &data.fields, &|member| quote!(&self.#member))?
+			}
+			Data::Enum(data) => {
+				let arms = data
+					.variants
+					.iter()
+					.map(|variant| {
+						let name = &variant.ident;
+						let bindings = bind_fields(&variant.fields);
+						let fields =
+							clone_fields(&quote!(Self::#name), &variant.fields, &|member| {
+								let binding = binding_ident(&member);
+								quote!(#binding)
+							})?;
+						Ok(quote!(Self::#name #bindings => #fields))
+					})
+					.collect::<syn::Result<Vec<_>>>()?;
+				// An enum with no variants is uninhabited, so `match` on it needs no arms.
+				quote!(match self { #(#arms,)* })
+			}
+			Data::Union(data) => {
+				return Err(syn::Error::new(
+					data.union_token.span(),
+					"`DeepClone` cannot be derived for unions, because which field is live is \
+					 not known statically. `#[deepclone(clone)]` on the type clones it \
+					 shallowly instead",
+				));
+			}
 		}
 	};
 
 	let name = &input.ident;
 	let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-	let where_clause = match container_bound(input)? {
+	let where_clause = match container.bound {
 		Some(bound) => bound,
 		None => {
 			let mut clause = where_clause.cloned().unwrap_or_else(|| parse_quote!(where));
 			for param in input.generics.type_params() {
 				let param = &param.ident;
-				clause
-					.predicates
-					.push(parse_quote!(#param: ::deepclone::DeepClone));
+				// A shallow clone of the whole value needs `Clone`, not `DeepClone`.
+				clause.predicates.push(if container.clone {
+					parse_quote!(#param: ::core::clone::Clone)
+				} else {
+					parse_quote!(#param: ::deepclone::DeepClone)
+				});
 			}
 			clause
 		}
@@ -246,4 +289,17 @@ fn field_strategy(field: &syn::Field) -> syn::Result<Strategy> {
 		})?;
 	}
 	Ok(strategy.unwrap_or(Strategy::Deep))
+}
+
+/// Every field of a type, whatever its shape, for checks that do not care about the shape.
+fn fields_of(data: &Data) -> Vec<&syn::Field> {
+	match data {
+		Data::Struct(data) => data.fields.iter().collect(),
+		Data::Enum(data) => data
+			.variants
+			.iter()
+			.flat_map(|variant| variant.fields.iter())
+			.collect(),
+		Data::Union(data) => data.fields.named.iter().collect(),
+	}
 }

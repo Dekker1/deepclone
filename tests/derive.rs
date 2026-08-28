@@ -117,6 +117,51 @@ fn container_bound_override() {
 	assert_eq!(copy.value, Foreign(5));
 }
 
+/// `#[deepclone(clone)]` on the type itself, for one whose fields hold nothing shared. It asks
+/// nothing of the field types, which is the point: they need no `DeepClone` impl.
+#[test]
+fn container_clone() {
+	#[derive(Clone, DeepClone, Debug, PartialEq)]
+	#[deepclone(clone)]
+	struct Config {
+		name: String,
+		foreign: Foreign,
+		address: std::net::Ipv4Addr,
+	}
+
+	let original = Config {
+		name: "solver".to_owned(),
+		foreign: Foreign(1),
+		address: std::net::Ipv4Addr::LOCALHOST,
+	};
+
+	assert_eq!(original.deep_clone(), original);
+}
+
+/// The whole-type form never inspects the fields, so it covers shapes the field-by-field one
+/// cannot, and bounds type parameters by `Clone` rather than `DeepClone`.
+#[test]
+fn container_clone_covers_unions_and_generics() {
+	#[derive(Clone, Copy, DeepClone)]
+	#[deepclone(clone)]
+	#[repr(C)]
+	union Choice {
+		int: u32,
+		float: f32,
+	}
+
+	#[derive(Clone, DeepClone, Debug, PartialEq)]
+	#[deepclone(clone)]
+	struct Wrapper<T> {
+		value: T,
+	}
+
+	let copy = Choice { int: 7 }.deep_clone();
+	// SAFETY: `int` is the field that was written, and the copy is a bitwise duplicate.
+	assert_eq!(unsafe { copy.int }, 7);
+	assert_eq!(Wrapper { value: Foreign(2) }.deep_clone().value, Foreign(2));
+}
+
 fn double(value: &u32, _cloner: &mut Cloner) -> u32 {
 	value * 2
 }

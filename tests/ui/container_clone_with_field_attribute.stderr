@@ -1,0 +1,5 @@
+error: `#[deepclone(clone)]` on the type already clones every field, so a field attribute here would have no effect
+ --> tests/ui/container_clone_with_field_attribute.rs:6:5
+  |
+6 |     #[deepclone(default)]
+  |     ^

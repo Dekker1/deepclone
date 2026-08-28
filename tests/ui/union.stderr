@@ -1,4 +1,4 @@
-error: `DeepClone` cannot be derived for unions, because which field is live is not known statically
+error: `DeepClone` cannot be derived for unions, because which field is live is not known statically. `#[deepclone(clone)]` on the type clones it shallowly instead
  --> tests/ui/union.rs:4:1
   |
 4 | union Choice {

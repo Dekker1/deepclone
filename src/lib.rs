@@ -90,8 +90,9 @@
 //!
 //! An `Rc` only needs copying when something reachable through it can be mutated. When nothing
 //! can, sharing the original allocation is unobservable and cheaper, and `#[deepclone(clone)]`
-//! says so at the field. No bound can express this: `Freeze` is the nearest marker and it sees
-//! only interior mutability that is not behind a pointer.
+//! says so at the field, or on the type when that holds of all of it. No bound can express
+//! this: `Freeze` is the nearest marker and it sees only interior mutability that is not behind
+//! a pointer.
 //!
 //! # Trait objects
 //!

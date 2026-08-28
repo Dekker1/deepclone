@@ -1,4 +1,4 @@
-error: unknown `deepclone` container attribute, expected `bound = ".."`
+error: unknown `deepclone` container attribute, expected `clone` or `bound = ".."`
  --> tests/ui/unknown_container_attribute.rs:4:13
   |
 4 | #[deepclone(transparent)]
