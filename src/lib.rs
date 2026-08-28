@@ -86,7 +86,12 @@
 //!
 //! `impl<T: Clone> DeepClone for T` would reintroduce the footgun, since `Rc<T>: Clone` and
 //! without specialization such an impl could not be overridden for `Rc`. So a field whose type
-//! has no [`DeepClone`] impl is a compile error; opt out per field with `#[deepclone(clone)]`.
+//! has no [`DeepClone`] impl is a compile error.
+//!
+//! An `Rc` only needs copying when something reachable through it can be mutated. When nothing
+//! can, sharing the original allocation is unobservable and cheaper, and `#[deepclone(clone)]`
+//! says so at the field. No bound can express this: `Freeze` is the nearest marker and it sees
+//! only interior mutability that is not behind a pointer.
 //!
 //! # Trait objects
 //!

@@ -45,8 +45,11 @@ macro_rules! copy_wrapper {
 }
 
 /// Byte-backed slices behind a shared pointer, where the copy shares the original's
-/// allocation. None can hide interior mutability, so sharing is unobservable and saves the
-/// copy, while two fields on one source still reach one copy.
+/// allocation. Nothing reachable through them can be mutated, so sharing is unobservable and
+/// saves the copy, while two fields on one source still reach one copy.
+///
+/// `Rc<String>` would be just as safe, but it is covered by the sized impl below and cannot
+/// have its own. These are reachable only because they are unsized.
 macro_rules! immutable_slice {
 	($($ty:ty),* $(,)?) => {$(
 		impl DeepClone for Rc<$ty> {

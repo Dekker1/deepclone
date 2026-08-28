@@ -129,8 +129,8 @@ fn container_bound(input: &DeriveInput) -> syn::Result<Option<WhereClause>> {
 ///
 /// # Field attributes
 ///
-/// - `#[deepclone(clone)]` — use `Clone::clone`. Correct for immutable or unshared data,
-///   never for an `Rc` you want independent.
+/// - `#[deepclone(clone)]` — use `Clone::clone`, which on an `Rc` shares the allocation.
+///   Preferrable (and correct) when nothing reachable through the field can be mutated.
 /// - `#[deepclone(with = path)]` — call `path(&field, cloner)`.
 /// - `#[deepclone(default)]` — ignore the source value and use `Default::default()`.
 ///
