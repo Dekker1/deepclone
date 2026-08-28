@@ -7,9 +7,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-env:
-  RUST_CHANNEL: "stable"
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,9 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust toolchain
-        uses: moonrepo/setup-rust@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          channel: ${{ matrix.channel }}
+          toolchain: ${{ matrix.channel }}
       - name: Run tests
         run: cargo test --workspace --all-features
       # Every doctest uses the derive and rustdoc has no per-doctest cfg, so this checks
@@ -35,9 +32,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust toolchain and clippy
-        uses: moonrepo/setup-rust@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          channel: ${{ env.RUST_CHANNEL }}
+          toolchain: stable
           components: clippy
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -48,9 +45,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust toolchain and miri
-        uses: moonrepo/setup-rust@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          channel: nightly
+          toolchain: nightly
           components: miri
       # `-Zmiri-ignore-leaks` is required by the strong-`Rc`-cycle test, which builds a cycle
       # on purpose to assert that it panics; such a cycle leaks by construction.
@@ -63,8 +60,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust toolchain
-        uses: moonrepo/setup-rust@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          channel: ${{ env.RUST_CHANNEL }}
+          toolchain: stable
       - name: Run rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features

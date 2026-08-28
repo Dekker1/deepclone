@@ -17,11 +17,12 @@ jobs:
 
       # Check formatting of Rust files
       - name: Install Rust toolchain
-        run: |
-          rustup toolchain install --profile minimal --component rustfmt --no-self-update ${{ env.RUST_CHANNEL }}
-          rustup default ${{ env.RUST_CHANNEL }}
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_CHANNEL }}
+          components: rustfmt
       - name: Run cargo format
-        run: cargo +nightly fmt --all --check
+        run: cargo fmt --all --check
 
       # Check that top-level items in each Rust file are in the project's
       # opinionated sort order (mod, use, const/static, types, fn, impl, ...).
