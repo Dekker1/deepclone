@@ -106,6 +106,19 @@ fn a_mix_of_shared_and_plain_fields() {
 	assert!(!Arc::ptr_eq(&copy.threaded, &original.threaded));
 }
 
+/// A `Copy` field may be cloned with `#[deepclone(clone)]` without the derive tripping Clippy's
+/// `clone_on_copy` lint, which is checked by running Clippy over this test.
+#[test]
+fn clone_of_copy_field() {
+	#[derive(DeepClone)]
+	struct Copied {
+		#[deepclone(clone)]
+		value: Option<u32>,
+	}
+
+	assert_eq!(Copied { value: Some(3) }.deep_clone().value, Some(3));
+}
+
 #[test]
 fn container_bound_override() {
 	let copy = Opaque {

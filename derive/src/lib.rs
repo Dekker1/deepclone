@@ -240,6 +240,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 	Ok(quote! {
 		#[automatically_derived]
 		impl #impl_generics ::deepclone::DeepClone for #name #ty_generics #where_clause {
+			// A field cloned with `#[deepclone(clone)]` is spanned at the field, so Clippy
+			// reports a `Copy` field there as if the `clone` call was hand-written.
+			#[allow(clippy::clone_on_copy)]
 			fn deep_clone_in(&self, cloner: &mut ::deepclone::Cloner) -> Self {
 				#body
 			}
